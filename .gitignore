@@ -1,0 +1,31 @@
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 项目运行缓存
+.tree_farm/
+*.db
+*.db-shm
+*.db-wal
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 构建产物
+build/
+dist/
+*.egg-info/
