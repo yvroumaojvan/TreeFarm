@@ -1,0 +1,38 @@
+====================================================
+🌳🌳 树场简报（AI 请先读这个，别全读项目）🌳🌳
+====================================================
+会话: 第 1 轮 | 本轮已报小鸟 2 只 | 收敛阈值 ≤2 只
+基因库: 6 条（强 6 / 弱 0）| schema v2 | 小树: 激活 ✅
+
+【大树清单 · 每个文件的相关基因（小树视角）】
+  config.py [59B]
+      → 引用: (无)
+      ← 被引用: ['main.py']
+  main.py [222B]
+      → 引用: ['utils.helpers', 'utils.math_utils', 'config']
+      ← 被引用: (无)
+  Main.java [157B]  (非 Python，符号: ['Main', 'main'])
+  utils/__init__.py [18B]
+      → 引用: (无)
+      ← 被引用: (无)
+  utils/helpers.py [50B]
+      → 引用: (无)
+      ← 被引用: (无)
+  utils/math_utils.py [32B]
+      → 引用: (无)
+      ← 被引用: ['main.py']
+  utils/helpers.js [58B]  (非 Python，符号: ['greet'])
+  web/app.js [166B]  (非 Python，符号: ['run'])
+
+【杂草索引 · 不读全文，命中才展开】
+杂草 2 个文件，合计 109 字节（只存索引，未读全文）
+  demo_project/README.md  [64B]  # 树场演示项目 | 用来测试树场机制的最小项目。
+  demo_project/data/settings.json  [45B]  { | "theme": "dark", | "language": "zh-CN"
+
+垃圾箱: 空 ✅
+
+【下一步】
+  1. 挑重点文件展开阅读 → 发现可疑耦合就报小鸟
+  2. 强耦合: --bird | 弱耦合: --bird-weak | 自动: --analyze <文件>
+  3. 找相关代码: --search <关键词>
+  4. 每轮结束 --converge；垃圾箱 --fix 必须清空
