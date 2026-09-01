@@ -518,9 +518,10 @@ class TestSimple(unittest.TestCase):
         code = "def foo():\n    return 1\ndef bar():\n    return 2\nfoo()"
         result = self.runner.run_code(code, language="python", capture_coverage=True)
         self.assertTrue(result.success)
-        # 覆盖率数据可能被解析
+        # 覆盖率数据统一为 {files, overall_coverage}（v4.5 与 restricted 路径一致）
         if result.coverage:
-            self.assertIn("coverage", result.coverage)
+            self.assertIn("files", result.coverage)
+            self.assertIn("overall_coverage", result.coverage)
 
     def test_update_config(self):
         self.runner.update_config(max_memory_mb=512, max_cpu_seconds=20)

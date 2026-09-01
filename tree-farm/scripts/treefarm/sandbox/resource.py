@@ -115,7 +115,9 @@ class MemoryMonitor:
                 for line in f:
                     if line.startswith("VmRSS:"):
                         return int(line.split()[1])
-        except (FileNotFoundError, PermissionError, IndexError):
+        except (FileNotFoundError, PermissionError, ProcessLookupError, IndexError, OSError):
+            # v4.5 修复：进程退出瞬间 /proc/<pid> 消失会抛 ProcessLookupError/OSError，
+            # 之前只捕获 FileNotFoundError，监控线程会打印异常堆栈
             pass
         return 0
 

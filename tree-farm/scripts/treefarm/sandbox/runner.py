@@ -172,10 +172,21 @@ class SandboxRunner:
         if capture_coverage and language == "python":
             cov_data = parse_coverage_output(result.stdout)
             if cov_data:
-                # 统一格式：添加 overall_coverage 字段
-                if "overall_coverage" not in cov_data and "coverage" in cov_data:
-                    cov_data["overall_coverage"] = cov_data["coverage"]
-                result.coverage = cov_data
+                # v4.5 统一格式：subprocess 覆盖率也转成与 restricted 一致的
+                # {files: {<sandbox>: {lines_covered, lines_total, coverage}}, overall_coverage}
+                covered_lines = cov_data.get("covered_line_numbers", [])
+                total_lines = self._extract_total_lines(cov_data)
+                overall = cov_data.get("overall_coverage", cov_data.get("coverage", 0.0))
+                result.coverage = {
+                    "files": {
+                        "<sandbox>": {
+                            "lines_covered": sorted(covered_lines),
+                            "lines_total": sorted(total_lines),
+                            "coverage": overall,
+                        }
+                    },
+                    "overall_coverage": overall,
+                }
                 result.stdout = self._strip_markers(result.stdout)
 
         return result
@@ -189,6 +200,13 @@ class SandboxRunner:
         # 移除 ===SANDBOX_COVERAGE=== ... ===END_COVERAGE===
         stdout = re.sub(r"\n*===SANDBOX_COVERAGE===.*?===END_COVERAGE===\n*", "", stdout, flags=re.DOTALL)
         return stdout.strip()
+
+    @staticmethod
+    def _extract_total_lines(cov_data: Dict[str, Any]) -> List[int]:
+        """从 subprocess 覆盖率数据还原总行号列表（covered ∪ uncovered）。"""
+        covered = set(cov_data.get("covered_line_numbers", []))
+        uncovered = set(cov_data.get("uncovered_lines", []))
+        return sorted(covered | uncovered)
 
     def run_function(self, func_code: str, func_name: str,
                      args: tuple = (), kwargs: dict = None,

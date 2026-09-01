@@ -5,6 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.5.0] - 2026-09-02
+
+### 性能/逻辑检测：正则堆砌 → AST 精确重写（本次核心）
+- `--performance` / `--logic` 从「同一文件遍历 8 遍 + 正则硬猜」重写为 **AST 单遍精确检测**
+  （`_PerfVisitor` + `_LogicVisitor`），规则基于真实语法树节点，不再靠正则猜
+- **性能检测规则**：循环内字符串拼接（`+=` / `s=s+'x'` / `str()` 调用）、循环内线性查找
+  （`in list` / `.index` / `.count`）、循环内 `re.compile`、N+1 查询
+  （`.execute` / `.query` / `.filter` 等）、递归无终止、递归无缓存
+- **逻辑检测规则**：可变默认参数、除零风险、边界条件（`for i in range(len(x))` 内 `x[i±1]`）、
+  竞态（仅真实多线程 + `self.x+=1` 或 dict 计数器无锁）、TOCTOU（含 `if os.path.exists` 分支）、
+  `is` 比较字面量、字符串大小比较
+- **误报大幅下降**：删除静态证明不了只会刷误报的规则（内存泄漏 / json 类型混淆 / `if x=y`）；
+  `x += 1` 整数累加不再误报字符串拼接、`range(len(x)-1)` 正确代码不再误报 off-by-one、
+  `json.loads().get()` 正常用法不再误报类型混淆、`count=5` 不再误报竞态
+- **实测**：14 个深 bug 靶子 + 8 个正常对照组 → 13 类深 bug 全抓齐 + 对照组 0 误报
+
+### 安全检测：污点变量收集 + 弱哈希收紧
+- 新增轻量级跨行数据流跟踪：识别「用户输入源 → 变量赋值」传播链
+  （`request.args/form/values/json/data.get`、`input()`、`sys.argv`、`params.get` 等 → 变量 → 拼接/赋值传播），
+  解决单行正则检测不到跨行数据流的问题
+- 弱哈希检测收紧：只在密码/口令/凭据语境下报，指纹/校验和场景（如 `sha1(raw).hexdigest()[:12]`）不再误报
+
+### 沙箱修复（v4.5）
+- **subprocess 路径补代码级防护**：此前只做资源限制，`os.system` / `open('/etc/shadow')` 可直接执行；
+  现在补调用级黑名单检查（危险 os 调用 / 危险 import / 网络模块）
+- **覆盖率精确统计**：改用 AST 解析可执行行号，不再把空行/注释/包装代码算进「总行」
+  （实测覆盖率从失真 75%→6.25% 的问题修正）
+- `mod` 别名修正：原为 `divmod`（返回元组），应为取模 `a % b`
+- 进程退出瞬间 `/proc/<pid>` 消失抛 `ProcessLookupError/OSError`：补捕获，不再刷异常堆栈
+- subprocess 覆盖率统一为与 restricted 一致的 `{files, overall_coverage}` 格式
+
+### 工程
+- 新增测试 `scripts/tests/test_perf_logic.py`（16 用例：14 深 bug 检出 + 2 对照组零误报）
+- **单文件检测修复**：`scan()` 对单文件路径返回空（`os.walk` 只遍历目录），导致直接传
+  `tree_farm.py xxx.py --performance` 时「扫描 0 个文件」；现补单文件分支，单文件模式恢复（新增 2 个回归测试）
+- 全量 257 测试通过
+
 ## [4.4.1] - 2026-08-31
 
 ### 思维树 v3.1：自动检测（默认开启，复杂任务主动询问）

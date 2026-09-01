@@ -1102,10 +1102,54 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
         rel = os.path.relpath(fpath, root) if root else fpath
         full_text = "".join(lines)
 
+        # v4.5 新增：污点变量收集（轻量级跨行数据流跟踪）
+        # 识别「用户输入源 → 变量赋值」的传播链，解决单行正则检测不到跨行数据流的问题
+        tainted_vars = set()
+        # 函数参数视为潜在不可信输入（外部调用者传入的值可能来自用户）
+        for ln in lines:
+            fm = re.search(r'''^\s*def\s+\w+\s*\(([^)]*)\)''', ln)
+            if fm:
+                for param in fm.group(1).split(","):
+                    param = param.strip().split("=")[0].strip().lstrip("*")
+                    if param and param != "self" and param != "cls":
+                        tainted_vars.add(param)
+        for ln in lines:
+            ln_strip = ln.strip()
+            if ln_strip.startswith("#"):
+                continue
+            # 用户输入源直接赋值：x = request.args.get("..") / x = input(..) / x = request.form[".."]
+            m = re.search(r'''(\w+)\s*=\s*request\.(?:args|form|values|json|data)\.get\s*\(''', ln)
+            if not m:
+                m = re.search(r'''(\w+)\s*=\s*request\.(?:args|form|values|json|files)\s*\[['"]''', ln)
+            if not m:
+                m = re.search(r'''(\w+)\s*=\s*input\s*\(''', ln)
+            if not m:
+                m = re.search(r'''(\w+)\s*=\s*sys\.argv\[''', ln)
+            if not m:
+                m = re.search(r'''(\w+)\s*=\s*(?:params|request\.query|self\.request)\s*\.get\s*\(''', ln)
+            if m:
+                tainted_vars.add(m.group(1))
+            # 污点传播：y = x（x 是污点变量）
+            m2 = re.search(r'''(\w+)\s*=\s*(\w+)\s*(?:\.strip\(\)|\.lower\(\))?\s*$''', ln)
+            if m2 and m2.group(2) in tainted_vars:
+                tainted_vars.add(m2.group(1))
+            # 污点传播（拼接赋值）：x = "..." + y  或  x = f"...{y}..."（右边表达式含污点变量 y）
+            m3 = re.search(r'''(\w+)\s*=\s*(.+)$''', ln)
+            if m3:
+                lhs, rhs = m3.group(1), m3.group(2)
+                if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))):
+                    if any(v in rhs for v in tainted_vars):
+                        tainted_vars.add(lhs)
+
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
+            # v4.5 改进：跳过安全规则库定义行（如 pattern_matcher.py 的 "pattern": "os.system($CMD)"，
+            # 这类字符串是用于检测别人代码的"漏洞模式"，不是插件自身的漏洞）
+            if '"pattern"' in line or "'pattern'" in line:
+                if re.search(r'''["']pattern["']\s*:\s*["']''', line):
+                    continue
 
             # 1. SQL注入检测
             sql_patterns = [
@@ -1184,7 +1228,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     severity_count["high"] += 1
                     break
 
-            # 6. 弱哈希检测
+            # 6. 弱哈希检测（v4.5收紧：只在密码/口令/凭据语境下报，指纹/校验和场景不算）
             hash_patterns = [
                 (r'''hashlib\.md5\s*\(''', "弱哈希：MD5用于密码"),
                 (r'''hashlib\.sha1\s*\(''', "弱哈希：SHA1用于密码"),
@@ -1192,10 +1236,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             ]
             for pattern, desc in hash_patterns:
                 if re.search(pattern, line):
-                    issues.append({"file": rel, "line": i, "type": "弱哈希",
-                                   "severity": "medium", "desc": desc, "code": stripped[:100]})
-                    severity_count["medium"] += 1
-                    break
+                    # 只有该行或相邻行出现密码/凭据语境才报，纯指纹/基因库（如 sha1(raw).hexdigest()[:12]）不算
+                    ctx = line + "".join(lines[max(0, i-1):min(len(lines), i+2)])
+                    if re.search(r'(password|passwd|pwd|credential|secret|auth|登录|口令|密码)', ctx, re.IGNORECASE):
+                        issues.append({"file": rel, "line": i, "type": "弱哈希",
+                                       "severity": "medium", "desc": desc, "code": stripped[:100]})
+                        severity_count["medium"] += 1
+                        break
 
             # 6.5 时序攻击检测（v4.1新增）
             timing_patterns = [
@@ -1273,35 +1320,43 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     break
 
 
-            # 6.10 路径遍历增强检测（v4.2新增）
+            # 6.10 路径遍历增强检测（v4.2新增，v4.5收紧：拼接 + 明确用户输入源）
             path_traversal_patterns = [
-                (r'''os\.path\.join\s*\([^)]*\{[^}]+\}''', "路径遍历：os.path.join拼接用户输入，绝对路径会忽略前面路径"),
-                (r'''open\s*\([^)]*\+[^)]*\)''', "路径遍历：open拼接用户输入路径"),
-                (r'''send_file\s*\([^)]*\+''', "路径遍历：send_file拼接用户输入路径"),
+                (r'''os\.path\.join\s*\([^)]*(request\.(args|form|values|json|get|files)|request\[|params\[|args\[|form\[|input\(|sys\.argv)''',
+                 "路径遍历：os.path.join拼接用户输入，绝对路径会忽略前面路径"),
+                (r'''open\s*\([^)]*\+[^)]*(request\.|params\[|args\[|form\[|input\()''',
+                 "路径遍历：open拼接用户输入路径"),
+                (r'''send_file\s*\([^)]*(request\.|params\[|args\[|form\[|input\()''',
+                 "路径遍历：send_file接收用户输入路径"),
             ]
             for pattern, desc in path_traversal_patterns:
-                if re.search(pattern, line):
+                if re.search(pattern, line, re.IGNORECASE):
                     issues.append({"file": rel, "line": i, "type": "路径遍历",
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
                     severity_count["high"] += 1
                     break
 
-            # 6.10.2 pathlib路径遍历（v4.3新增，YesWeHack研究案例）
-            if re.search(r'Path\s*\(', line) and re.search(r'\s*/\s*', line):
-                if re.search(r'(username|user_id|filename|file_path|path|name|input|request|args|get)', line, re.IGNORECASE):
+            # 6.10.2 pathlib路径遍历（v4.3新增，v4.5收紧：明确用户输入源）
+            if re.search(r'Path\s*\(', line):
+                if re.search(r'(request\.(args|form|values|json|get|files)|request\[|params\[|args\[|form\[|input\(|sys\.argv|query\[|body\[)', line, re.IGNORECASE):
                     issues.append({"file": rel, "line": i, "type": "路径遍历",
                                    "severity": "high", "desc": "pathlib.Path拼接用户输入，若为绝对路径会忽略base目录(Path traversal)", "code": stripped[:100]})
                     severity_count["high"] += 1
-            # 6.10.3 Zip Slip漏洞检测（v4.3新增）
-            if "zipfile" in line or ".extract(" in line or ".extractall(" in line:
-                if re.search(r'\.extract(?:all)?\s*\(', line):
+            # 6.10.3 Zip Slip漏洞检测（v4.3新增，v4.5收紧：只认真实调用）
+            # 真实 Zip Slip：zipfile.ZipFile(...) 或 .extract(...) 代码调用
+            # 排除：检测规则自身（含 "in line" 判断特征）、正则定义行（re.search/compile 里写的 \.extract）
+            is_rule_definition = ('" in line' in line or "' in line" in line)
+            is_regex_line = re.search(r'''re\.(search|match|compile|findall|fullmatch)\s*\(''', line)
+            if not is_rule_definition and not is_regex_line:
+                if re.search(r'''zipfile\.ZipFile''', line) or re.search(r'''\.extract(?:all)?\s*\([^"'\s]''', line):
                     issues.append({"file": rel, "line": i, "type": "Zip Slip",
                                    "severity": "high", "desc": "zipfile.extract未校验压缩包内文件名，存在Zip Slip路径遍历漏洞", "code": stripped[:100]})
                     severity_count["high"] += 1
 
-            # 6.10.1 路径遍历宽泛检测（v4.2.1新增）
+            # 6.10.1 路径遍历宽泛检测（v4.2.1新增，v4.5收紧：只认明确用户输入源）
             if "os.path.join" in line:
-                if re.search(r'(username|user_id|filename|file_path|path|name|input|request|args)', line, re.IGNORECASE):
+                # 只有明确的 Web 用户输入源才算路径遍历，变量名叫 path/name 不等于用户输入
+                if re.search(r'(request\.(args|form|values|json|get|files)|request\[|params\[|args\[|form\[|input\(|sys\.argv|query\[|body\[|headers\[)', line, re.IGNORECASE):
                     issues.append({"file": rel, "line": i, "type": "路径遍历",
                                    "severity": "high", "desc": "os.path.join拼接用户输入，若为绝对路径会忽略前面路径", "code": stripped[:100]})
                     severity_count["high"] += 1
@@ -1316,19 +1371,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                         severity_count["high"] += 1
                         break
 
-            # 6.12 ReDoS增强检测（v4.2新增）
+            # 6.12 ReDoS增强检测（v4.2新增，v4.5收紧：只认真正的嵌套量词）
             if re.search(r'''re\.(compile|match|search|findall|fullmatch)''', line):
-                # 检查是否有嵌套量词或重叠模式
-                if re.search(r'''(\([^)]*[+*]\)[+*]|\.[+*].*?\.[+*]|\w\s*\[\s*[+*]\s*\].*?[+*])''', line):
+                # 真正的灾难性回溯：捕获组内已含量词，组外再跟量词，如 (a+)+ (a*)* (a+)*
+                # 排除非捕获组 (?:...)* —— 内部是固定字符+量词，属有界回溯
+                if re.search(r'''\((?![?:?=!<])[^()]*?[+*]\s*\)\s*[+*]''', line):
                     issues.append({"file": rel, "line": i, "type": "ReDoS",
-                                   "severity": "high", "desc": "正则表达式包含嵌套量词/重叠量词，可能导致灾难性回溯", "code": stripped[:100]})
-                    severity_count["high"] += 1
-
-            # 6.12.1 ReDoS宽泛检测（v4.2.1新增）
-            if re.search(r're\.(compile|match|search|findall)\s*\(', line):
-                if re.search(r'[*+].*?[*+]', line):
-                    issues.append({"file": rel, "line": i, "type": "ReDoS",
-                                   "severity": "high", "desc": "正则表达式包含重复量词，可能导致灾难性回溯(ReDoS)", "code": stripped[:100]})
+                                   "severity": "high", "desc": "正则表达式包含嵌套量词（如(a+)+），可能导致灾难性回溯", "code": stripped[:100]})
                     severity_count["high"] += 1
 
             # 6.13 SQL注入增强检测（v4.2新增）
@@ -1339,6 +1388,10 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             ]
             for pattern, desc in sql_injection_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
+                    # v4.5 改进：排除参数化查询——含 ? 占位符的 f-string 中，
+                    # {} 只是生成占位符数量（如 {marks} = "?,?,?"），是安全的
+                    if pattern.startswith("f[\"']") and "?" in line:
+                        continue
                     issues.append({"file": rel, "line": i, "type": "SQL注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
@@ -1370,6 +1423,91 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "severity": "medium", "desc": desc, "code": stripped[:100]})
                     severity_count["medium"] += 1
                     break
+
+            # 9. SSRF检测（v4.5新增：完全缺失项）
+            # 核心判定：URL 必须来自「用户输入源」（request/input/args/form/params/data/query 等），
+            # 否则如 urlopen(req)（固定 Request 对象）是合法场景，不算 SSRF
+            ssrf_patterns = [
+                (r'''requests\.(get|post|put|delete|head|patch)\s*\(\s*f["'][^"']*\{[^}]*''',
+                 "SSRF：f-string拼接URL请求"),
+                (r'''requests\.(get|post|put|delete|head|patch)\s*\([^)]*\+[^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
+                 "SSRF：字符串拼接用户输入URL"),
+                (r'''urllib\.(request\.urlopen|urlopen)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
+                 "SSRF：urllib请求用户可控URL"),
+                (r'''urllib\.request\.urlopen\s*\([^)]*\{[^}]*''',
+                 "SSRF：urllib拼接用户输入URL"),
+                (r'''httpx\.(get|post|put|delete)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
+                 "SSRF：httpx请求用户可控URL"),
+                (r'''aiohttp\.(ClientSession|request)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
+                 "SSRF：aiohttp请求用户可控URL"),
+                (r'''(requests|urllib|httpx)[^\n]*url\s*=\s*(request|input|args|params|data|form)''',
+                 "SSRF：请求URL来自用户输入"),
+                (r'''(requests|httpx)\.(get|post|put|delete)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[)''',
+                 "SSRF：请求目标来自用户请求参数"),
+            ]
+            for pattern, desc in ssrf_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    issues.append({"file": rel, "line": i, "type": "SSRF",
+                                   "severity": "high", "desc": desc, "code": stripped[:100]})
+                    severity_count["high"] += 1
+                    break
+
+            # 10. JWT完整漏洞检测（v4.5新增：原仅有硬编码secret）
+            jwt_patterns = [
+                (r'''jwt\.decode\s*\([^)]*verify\s*=\s*False''',
+                 "JWT：关闭签名验证（verify=False），攻击者可伪造任意token"),
+                (r'''jwt\.decode\s*\([^)]*options\s*=\s*\{[^}]*verify_signature[^}]*False''',
+                 "JWT：关闭签名验证（verify_signature=False）"),
+                (r'''jwt\.decode\s*\([^)]*algorithms\s*=\s*\[?\s*["']?none["']?''',
+                 "JWT：允许alg=none算法，可无密钥伪造签名"),
+                (r'''jwt\.(encode|decode)\s*\([^)]*algorithm\s*=\s*["']none["']''',
+                 "JWT：使用alg=none（不签名），可被伪造"),
+                (r'''jwt\.encode\s*\([^)]*algorithm\s*=\s*["']HS256["']''',
+                 "JWT：使用HS256弱密钥（若密钥为硬编码/弱密钥则易被暴力破解）"),
+                (r'''decode\s*\(\s*jwt\s*[,)]''',
+                 "JWT：可疑的JWT解码调用，需确认签名验证是否开启"),
+            ]
+            for pattern, desc in jwt_patterns:
+                if re.search(pattern, line):
+                    issues.append({"file": rel, "line": i, "type": "JWT漏洞",
+                                   "severity": "high", "desc": desc, "code": stripped[:100]})
+                    severity_count["high"] += 1
+                    break
+
+        # v4.5 新增：跨行污点跟踪检测（污点变量流入危险 sink 才报）
+        # 解决「用户输入先赋给变量，变量再拼进危险函数」跨行数据流漏报问题
+        if tainted_vars:
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                # 危险 sink：SQL、命令执行、SSRF 请求、文件打开
+                tainted_used = any(v in line for v in tainted_vars)
+                if not tainted_used:
+                    continue
+                # SQL 注入：execute/query/raw 的参数含污点变量
+                # 排除 def execute(...) 方法定义行、self.execute(...) 自定义方法调用
+                is_def = re.match(r'^\s*(async\s+)?def\s+', line)
+                if not is_def and (re.search(r'''(?<!self)\.(execute|query|raw)\s*\(''', line) or re.search(r'''(?<![\w.])execute\s*\(\s*[a-zA-Z_]''', line)):
+                    if any(v in line for v in tainted_vars):
+                        # 排除纯占位符参数化（参数是 ? 或 (sql, params) 的 params 部分）
+                        if "?" not in line.split("(")[-1] or "=" in line:
+                            issues.append({"file": rel, "line": i, "type": "SQL注入",
+                                           "severity": "critical", "desc": "污点变量流入SQL查询（跨行数据流）", "code": stripped[:100]})
+                            severity_count["critical"] += 1
+                            continue
+                # SSRF：requests/httpx/urllib 请求含污点变量
+                if re.search(r'''(requests|httpx)\.(get|post|put|delete|head|patch)\s*\(''', line) or re.search(r'''urllib\.(request\.)?urlopen\s*\(''', line):
+                    issues.append({"file": rel, "line": i, "type": "SSRF",
+                                   "severity": "high", "desc": "污点变量流入URL请求（跨行数据流）", "code": stripped[:100]})
+                    severity_count["high"] += 1
+                    continue
+                # 路径遍历：open/send_file 含污点变量
+                if re.search(r'''(?<!with\s)(?<!as\s)\bopen\s*\(''', line) or re.search(r'''send_file\s*\(''', line):
+                    issues.append({"file": rel, "line": i, "type": "路径遍历",
+                                   "severity": "high", "desc": "污点变量流入文件路径（跨行数据流）", "code": stripped[:100]})
+                    severity_count["high"] += 1
+                    continue
 
     total = len(issues)
     risk_score = min(100, severity_count["critical"] * 15 + severity_count["high"] * 8 +
@@ -1410,230 +1548,201 @@ def _security_suggestions(sev: Dict[str, int], total: int) -> List[str]:
 # 性能问题检测模块 (v4.0 新增)
 # ============================================================
 
-def detect_performance_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
-    """检测性能问题：O(n²)算法、内存泄漏、递归爆炸、资源泄漏、字符串拼接循环、N+1查询"""
-    issues = []
-    severity_count = {"high": 0, "medium": 0, "low": 0}
+# ============================================================
+# 性能问题检测模块（v4.5 AST 重写：替代 v4.0-4.5 的正则堆砌）
+# ============================================================
 
+_LOOP_TYPES = (ast.For, ast.While, ast.AsyncFor)
+
+
+def _iter_py_ast(tree_files, root):
+    """逐个解析 Python 文件为 AST，产出 (fpath, rel, lines, tree)。"""
     for fpath in tree_files:
         if not fpath.endswith(".py"):
             continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                lines = fh.readlines()
+                text = fh.read()
         except Exception:
             continue
-
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
         rel = os.path.relpath(fpath, root) if root else fpath
-        full_text = "".join(lines)
-
-        # 1. O(n²)嵌套循环检测
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            # 检测for嵌套for（同一缩进层级内的嵌套）
-            if re.match(r'^\s*for\s+', line):
-                # 检查后续10行内是否有另一个for
-                indent = len(line) - len(line.lstrip())
-                for j in range(i, min(i + 15, len(lines))):
-                    next_indent = len(lines[j]) - len(lines[j].lstrip())
-                    if next_indent > indent and re.match(r'^\s*for\s+', lines[j]):
-                        # 检查内层循环是否有列表操作（append/in/索引）
-                        inner_block = "".join(lines[j:min(j+5, len(lines))])
-                        if re.search(r'\.append\(|\.extend\(|in\s+\w+|\[\w+\]', inner_block):
-                            issues.append({"file": rel, "line": i, "type": "O(n²)算法",
-                                           "severity": "high",
-                                           "desc": "嵌套循环中操作列表，可能为O(n²)复杂度",
-                                           "code": stripped[:100]})
-                            severity_count["high"] += 1
-                        break
-
-        # 2. 内存泄漏检测：全局列表/字典无限追加
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            # 检测self.xxx.append / self.xxx[key] = 在没有清理机制的类中
-            if re.search(r'self\.\w+\.append\(', line) or re.search(r'self\.\w+\[.*\]\s*=', line):
-                # 检查类中是否有清理方法
-                class_start = -1
-                for j in range(i, 0, -1):
-                    if re.match(r'^\s*class\s+', lines[j-1]):
-                        class_start = j - 1
-                        break
-                if class_start >= 0:
-                    # 找类结束位置
-                    class_end = len(lines)
-                    for j in range(class_start + 1, len(lines)):
-                        if re.match(r'^\S', lines[j]) and not lines[j].strip().startswith("#"):
-                            class_end = j
-                            break
-                    class_text = "".join(lines[class_start:class_end])
-                    # 检查是否有清理机制（clear/pop/del/定期清理）
-                    has_cleanup = bool(re.search(r'\.clear\(|\.pop\(|del\s+self\.|def\s+clean', class_text))
-                    if not has_cleanup:
-                        issues.append({"file": rel, "line": i, "type": "内存泄漏",
-                                       "severity": "medium",
-                                       "desc": "类成员集合只增不减，无清理机制，可能内存泄漏",
-                                       "code": stripped[:100]})
-                        severity_count["medium"] += 1
-
-        # 3. 递归爆炸检测
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if re.match(r'^\s*def\s+(\w+)\s*\(', line):
-                func_name = re.match(r'^\s*def\s+(\w+)\s*\(', line).group(1)
-                # 找函数结束位置
-                func_indent = len(line) - len(line.lstrip())
-                func_end = len(lines)
-                for j in range(i, len(lines)):
-                    if j > i and lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip()) <= func_indent):
-                        func_end = j
-                        break
-                func_text = "".join(lines[i:func_end])
-                # 检测递归调用
-                if re.search(rf'\b{func_name}\s*\(', func_text):
-                    # 检查是否有终止条件
-                    has_base = bool(re.search(r'if\s+.*?:\s*return|if\s+.*?<=|if\s+.*?>=|if\s+.*?==', func_text))
-                    has_cache = bool(re.search(r'@lru_cache|@cache|memo', func_text))
-                    if not has_base and not has_cache:
-                        issues.append({"file": rel, "line": i, "type": "递归爆炸",
-                                       "severity": "high",
-                                       "desc": f"递归函数{func_name}无明显终止条件或缓存",
-                                       "code": stripped[:100]})
-                        severity_count["high"] += 1
-                    elif not has_cache and func_name in ("fibonacci", "fib", "factorial"):
-                        issues.append({"file": rel, "line": i, "type": "递归性能",
-                                       "severity": "medium",
-                                       "desc": f"递归函数{func_name}无缓存，指数级复杂度",
-                                       "code": stripped[:100]})
-                        severity_count["medium"] += 1
-
-        # 4. 资源泄漏检测：open没有with
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            # 检测 open( 不在 with 语句中
-            if re.search(r'(?<!with\s)(?<!as\s)\bopen\s*\(', line) and 'with' not in line:
-                # 检查后续是否有close
-                has_close = False
-                for j in range(i, min(i + 20, len(lines))):
-                    if re.search(r'\.close\(\)', lines[j]):
-                        has_close = True
-                        break
-                    if lines[j].strip() and (len(lines[j]) - len(lines[j].lstrip()) <= len(line) - len(line.lstrip())) and j > i:
-                        break
-                if not has_close:
-                    issues.append({"file": rel, "line": i, "type": "资源泄漏",
-                                   "severity": "medium",
-                                   "desc": "open()未使用with语句且未找到close()，文件句柄泄漏",
-                                   "code": stripped[:100]})
-                    severity_count["medium"] += 1
-
-        # 5. 字符串拼接循环检测
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if re.search(r'\w+\s*\+=\s*["\']', line) or re.search(r'\w+\s*=\s*\w+\s*\+\s*["\']', line):
-                # 检查是否在循环中
-                in_loop = False
-                for j in range(i, 0, -1):
-                    if re.match(r'^\s*(for|while)\s+', lines[j-1]):
-                        in_loop = True
-                        break
-                    if lines[j-1].strip() and (len(lines[j-1]) - len(lines[j-1].lstrip()) < len(line) - len(line.lstrip())):
-                        break
-                if in_loop:
-                    issues.append({"file": rel, "line": i, "type": "字符串拼接",
-                                   "severity": "low",
-                                   "desc": "循环中使用+=拼接字符串，O(n²)性能，建议用join()",
-                                   "code": stripped[:100]})
-                    severity_count["low"] += 1
+        yield fpath, rel, text.splitlines(), tree
 
 
-        # 6.5 内存泄漏增强检测（v4.2新增）
-        # 检查全局/类变量只增不减
-        if re.search(r'''(self\.\w+|\b[a-z_]+)\s*(append|extend|add|update|\[\w+\]\s*=)''', line):
-            var_name = re.search(r'''(self\.\w+|\b[a-z_]+)\s*(append|extend|add)''', line)
-            if var_name:
-                vname = var_name.group(1)
-                # 检查是否有清理机制
-                has_cleanup = False
-                for j in range(max(0, i-20), min(i+20, len(lines))):
-                    if vname in lines[j] and re.search(r'''(clear|pop|del\s|remove|=\s*\[\s*\]|=\s*\{\s*\})''', lines[j]):
-                        has_cleanup = True
-                        break
-                if not has_cleanup and i > 5:
-                    issues.append({"file": rel, "line": i, "type": "内存泄漏",
-                                       "severity": "medium", "desc": f"变量{vname}只增不减，无清理机制，可能内存泄漏", "code": stripped[:100]})
-                    severity_count["medium"] += 1
+class _PerfVisitor(ast.NodeVisitor):
+    """性能问题检测器：单遍 AST 遍历，只在“真循环体内”报。
 
-        # 6.6 字符串拼接循环增强检测（v4.2新增）
-        if re.search(r'''\+\s*=\s*.*?(str|\w+\s*\+)''', line) or re.search(r'''result\s*\+=\s*''', line):
-            # 检查是否在循环中
-            for j in range(max(0, i-10), i):
-                if re.search(r'''\b(for|while)\b''', lines[j]):
-                    issues.append({"file": rel, "line": i, "type": "字符串拼接",
-                                       "severity": "medium", "desc": "循环中使用+=拼接字符串，O(n²)复杂度，应用join()", "code": stripped[:100]})
-                    severity_count["medium"] += 1
-                    break
+    规则：循环内字符串拼接 / 循环内线性查找(O(n²)) / 循环内 re.compile / N+1 查询 /
+    递归无终止条件或缓存。
+    """
 
-        # 6.7 全局变量内存泄漏 + 字符串拼接循环检测（v4.2.1修复版）
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            # 全局变量内存泄漏检测
-            if re.search(r'^[a-z_]+\s*=\s*\[\s*\]', line) or re.search(r'^[a-z_]+\s*=\s*\{\s*\}', line):
-                var_name = re.search(r'^([a-z_]+)\s*=', line)
-                if var_name:
-                    vname = var_name.group(1)
-                    has_growth = False
-                    has_cleanup = False
-                    for j in range(i, min(i+50, len(lines))):
-                        if vname in lines[j]:
-                            if re.search(r'(append|extend|add|update)', lines[j]):
-                                has_growth = True
-                            if re.search(r'(clear|pop|del\s+' + vname + '|remove)', lines[j]):
-                                has_cleanup = True
-                    if has_growth and not has_cleanup:
-                        issues.append({"file": rel, "line": i, "type": "内存泄漏",
-                                           "severity": "medium", "desc": f"全局变量{vname}只增不减，无清理机制，可能内存泄漏", "code": stripped[:100]})
-                        severity_count["medium"] += 1
-            # 字符串拼接循环检测
-            if '+=' in line and ('str(' in line or '+' in line):
-                for j in range(max(0, i-15), i):
-                    if re.match(r'^\s*(for|while)\b', lines[j]):
-                        issues.append({"file": rel, "line": i, "type": "字符串拼接",
-                                           "severity": "medium", "desc": "循环中使用+=拼接字符串，O(n²)复杂度，应用join()", "code": stripped[:100]})
-                        severity_count["medium"] += 1
-                        break
+    _DB_CALLS = {"execute", "query", "filter", "fetchall", "fetchone",
+                 "fetchmany", "save", "commit"}
 
-        # 6. N+1查询检测
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if re.search(r'\.execute\(|\.query\(|\.filter\(|\.get\(', line):
-                in_loop = False
-                for j in range(i, 0, -1):
-                    if re.match(r'^\s*(for|while)\s+', lines[j-1]):
-                        in_loop = True
-                        break
-                    if lines[j-1].strip() and (len(lines[j-1]) - len(lines[j-1].lstrip()) < len(line) - len(line.lstrip())):
-                        break
-                if in_loop:
-                    issues.append({"file": rel, "line": i, "type": "N+1查询",
-                                   "severity": "high",
-                                   "desc": "循环中执行数据库查询，可能导致N+1查询问题",
-                                   "code": stripped[:100]})
-                    severity_count["high"] += 1
+    def __init__(self, lines, rel):
+        self.lines = lines
+        self.rel = rel
+        self.issues = []
+        self._anc = []  # 祖先节点栈
 
+    def _src(self, node):
+        if not node.lineno:
+            return ""
+        return self.lines[node.lineno - 1].strip()[:100]
+
+    def _add(self, lineno, itype, sev, desc):
+        code = self.lines[lineno - 1].strip()[:100] if 0 < lineno <= len(self.lines) else ""
+        self.issues.append({"file": self.rel, "line": lineno, "type": itype,
+                            "severity": sev, "desc": desc, "code": code})
+
+    def generic_visit(self, node):
+        self._anc.append(node)
+        super().generic_visit(node)
+        self._anc.pop()
+
+    def _in_loop(self):
+        return any(isinstance(p, _LOOP_TYPES) for p in self._anc)
+
+    # ---- 循环内字符串拼接：s += "x" / s = s + "x" / s += str(i) ----
+    @staticmethod
+    def _is_str_expr(node):
+        """判断表达式是否“看起来是字符串”：字面量 / f-string / str() 调用。"""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return True
+        if isinstance(node, ast.JoinedStr):
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "str"):
+            return True
+        return False
+
+    def visit_AugAssign(self, node):
+        if isinstance(node.op, ast.Add) and self._in_loop() and self._is_str_expr(node.value):
+            self._add(node.lineno, "循环内字符串拼接", "medium",
+                      "循环内使用 += 拼接字符串，O(n²) 复杂度，建议收集后用 ''.join()")
+        self.generic_visit(node)
+
+    def visit_Assign(self, node):
+        if (self._in_loop() and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.BinOp)
+                and isinstance(node.value.op, ast.Add)
+                and isinstance(node.value.left, ast.Name)
+                and node.value.left.id == node.targets[0].id
+                and self._is_str_expr(node.value.right)):
+            self._add(node.lineno, "循环内字符串拼接", "medium",
+                      "循环内 s = s + '...' 拼接字符串，O(n²) 复杂度，建议 ''.join()")
+        self.generic_visit(node)
+
+    # ---- 循环内线性查找：x in 列表 / .index() / .count() ----
+    def visit_Compare(self, node):
+        if self._in_loop():
+            for op, right in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)) and self._is_linear_container(right):
+                    self._add(node.lineno, "循环内线性查找", "medium",
+                              "循环内使用 in 在列表上线性查找，O(n²)，建议提前转为 set/dict")
+        self.generic_visit(node)
+
+    @staticmethod
+    def _is_linear_container(node):
+        """右操作数是否为“可能为列表”的线性容器（排除 set/dict/range/字符串/字面量元组）。"""
+        if isinstance(node, (ast.List, ast.ListComp, ast.Subscript)):
+            return True
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return node.func.id not in ("set", "frozenset", "dict", "range",
+                                        "enumerate", "zip", "tuple", "str", "keys", "values")
+        return False
+
+    # ---- 循环内 re.compile / N+1 查询 ----
+    def visit_Call(self, node):
+        if self._in_loop() and isinstance(node.func, ast.Attribute):
+            fname = node.func.attr
+            if fname in ("index", "count"):
+                self._add(node.lineno, "循环内线性查找", "medium",
+                          f"循环内调用 .{fname}() 线性查找，O(n²)，建议转 set/dict")
+            elif fname in self._DB_CALLS:
+                self._add(node.lineno, "N+1 查询", "high",
+                          f"循环内执行数据库查询 .{fname}()，可能导致 N+1 查询，建议改为批量查询")
+            elif (fname == "compile" and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id == "re"):
+                self._add(node.lineno, "循环内正则编译", "medium",
+                          "循环内重复调用 re.compile()，正则每次编译，建议提到循环外复用")
+        self.generic_visit(node)
+
+    # ---- 递归无终止条件 / 无缓存 ----
+    def visit_FunctionDef(self, node):
+        name = node.name
+        has_self_call = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id == name for n in ast.walk(node))
+
+        def _has_base(fn):
+            for n in ast.walk(fn):
+                if isinstance(n, ast.If):
+                    for branch in (n.body, n.orelse):
+                        if any(isinstance(s, (ast.Return, ast.Raise)) for s in branch):
+                            return True
+            return False
+
+        if has_self_call:
+            decos = ""
+            try:
+                decos = " ".join(ast.unparse(d) for d in node.decorator_list)
+            except Exception:
+                pass
+            has_cache = ("lru_cache" in decos or "cache" in decos or "memo" in decos
+                         or "@cache" in decos or "memo" in decos)
+            # 自调用分支数 >= 2（如 f(n-1)+f(n-2)）＝指数级重复计算，需缓存
+            self_branch_count = sum(
+                1 for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == name)
+            if not _has_base(node):
+                self._add(node.lineno, "递归无终止", "medium",
+                          f"递归函数 {name} 无明显终止条件（无 if/return 基础情形）")
+            elif not has_cache and self_branch_count >= 2:
+                self._add(node.lineno, "递归无缓存", "medium",
+                          f"递归函数 {name} 分支自调用 {self_branch_count} 次且无缓存，可能指数级重复计算，建议 @lru_cache")
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+
+def _perf_suggestions(sev: Dict[str, int], total: int) -> List[str]:
+    s = []
+    if total == 0:
+        s.append("未发现明显性能问题，保持优化习惯 🎉")
+        return s
+    if sev["high"] > 0:
+        s.append(f"发现 {sev['high']} 个高性能问题（N+1 查询），建议优先优化")
+    if sev["medium"] > 0:
+        s.append(f"发现 {sev['medium']} 个中性能问题（循环内 O(n²) 操作/字符串拼接），建议排查")
+    s.append("循环内 in/index/count 线性查找可先转 set/dict 再判断，循环内 re.compile 提到循环外")
+    s.append("循环内字符串拼接改用 ''.join()，数据库查询移出循环改为批量查询")
+    return s
+
+
+def detect_performance_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
+    """检测性能问题（v4.5 AST 重写）：循环内字符串拼接 / 循环内线性查找(O(n²)) /
+    循环内 re.compile / N+1 查询 / 递归无终止。
+
+    基于 ast 模块单遍遍历，只在“真循环体内”判定，注释、字符串、方法定义不再误报。
+    返回契约不变：{total, grade, emoji, perf_score, severity, issues, suggestions}。
+    """
+    issues: List[Dict[str, Any]] = []
+    for _fpath, rel, lines, tree in _iter_py_ast(tree_files, root):
+        vis = _PerfVisitor(lines, rel)
+        vis.visit(tree)
+        issues.extend(vis.issues)
+
+    severity_count = {"high": 0, "medium": 0, "low": 0}
+    for i in issues:
+        severity_count[i["severity"]] += 1
     total = len(issues)
     perf_score = min(100, severity_count["high"] * 12 + severity_count["medium"] * 5 + severity_count["low"] * 2)
     if perf_score >= 60:
@@ -1650,177 +1759,288 @@ def detect_performance_issues(tree_files: List[str], root: Optional[str] = None)
             "suggestions": _perf_suggestions(severity_count, total)}
 
 
-def _perf_suggestions(sev: Dict[str, int], total: int) -> List[str]:
+# ============================================================
+# 逻辑错误检测模块（v4.5 AST 重写：替代 v4.0-4.4 的正则堆砌）
+# ============================================================
+
+class _LogicVisitor(ast.NodeVisitor):
+    """逻辑错误检测器：单遍 AST 遍历，精确判定。
+
+    规则：可变默认参数 / 除零风险 / 边界条件越界 / 竞态条件（仅真实用线程）/
+    TOCTOU / is 与字面量比较 / 字符串大小比较。
+    """
+
+    _SAFE_DIVISORS = {"len", "abs", "max", "min", "sum"}
+    _LOOP_INDEX_VARS = {"i", "j", "k", "n", "x", "y", "z", "t", "idx"}
+
+    def __init__(self, lines, rel, has_threads):
+        self.lines = lines
+        self.rel = rel
+        self.has_threads = has_threads
+        self.issues = []
+        self._anc = []
+
+    def _add(self, lineno, itype, sev, desc):
+        code = self.lines[lineno - 1].strip()[:100] if 0 < lineno <= len(self.lines) else ""
+        self.issues.append({"file": self.rel, "line": lineno, "type": itype,
+                            "severity": sev, "desc": desc, "code": code})
+
+    def generic_visit(self, node):
+        self._anc.append(node)
+        super().generic_visit(node)
+        self._anc.pop()
+
+    def _enclosing_func(self, node):
+        for p in reversed(self._anc):
+            if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return p
+        return None
+
+    # ---- 可变默认参数 ----
+    def visit_FunctionDef(self, node):
+        for a in node.args.defaults + [d for d in node.args.kw_defaults if d is not None]:
+            if isinstance(a, (ast.List, ast.Dict, ast.Set)):
+                self._add(node.lineno, "可变默认参数", "medium",
+                          "函数默认参数使用可变对象（[]/{}/set()），所有调用共享同一实例，建议改为 None")
+        self.generic_visit(node)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    # ---- 除零风险 ----
+    def _has_zero_guard(self, node, var):
+        fn = self._enclosing_func(node)
+        if fn is None:
+            return False
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.If, ast.While, ast.Assert)) and hasattr(n, "test"):
+                t = n.test
+                if isinstance(t, ast.Compare):
+                    for op, c in zip(t.ops, t.comparators):
+                        if (isinstance(c, ast.Constant) and isinstance(c.value, int)
+                                and c.value == 0 and isinstance(t.left, ast.Name)
+                                and t.left.id == var):
+                            return True
+                    if (isinstance(t.left, ast.Constant) and isinstance(t.left.value, int)
+                            and t.left.value == 0
+                            and any(isinstance(c, ast.Name) and c.id == var for c in t.comparators)):
+                        return True
+        return False
+
+    def visit_BinOp(self, node):
+        if (isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod))
+                and isinstance(node.right, ast.Name)
+                and node.right.id not in self._SAFE_DIVISORS
+                and node.right.id not in self._LOOP_INDEX_VARS
+                and not self._has_zero_guard(node, node.right.id)):
+            self._add(node.lineno, "除零风险", "low",
+                      f"除以变量 {node.right.id}，未发现前置非零检查，若为 0 将抛 ZeroDivisionError")
+        self.generic_visit(node)
+
+    # ---- 边界条件：for i in range(len(x)) 内访问 x[i±1] ----
+    def visit_For(self, node):
+        tgt = node.target
+        it = node.iter
+        if (isinstance(tgt, ast.Name) and isinstance(it, ast.Call)
+                and isinstance(it.func, ast.Name) and it.func.id == "range"
+                and len(it.args) == 1):
+            larg = it.args[0]
+            if (isinstance(larg, ast.Call) and isinstance(larg.func, ast.Name)
+                    and larg.func.id == "len" and len(larg.args) == 1):
+                coll = self._as_name(larg.args[0])
+                if coll:
+                    for n in ast.walk(node):
+                        if isinstance(n, ast.Subscript) and self._as_name(n.value) == coll:
+                            sl = n.slice
+                            if (isinstance(sl, ast.BinOp) and isinstance(sl.left, ast.Name)
+                                    and sl.left.id == tgt.id
+                                    and isinstance(sl.op, (ast.Add, ast.Sub))
+                                    and isinstance(sl.right, ast.Constant)
+                                    and sl.right.value == 1):
+                                self._add(n.lineno, "边界条件", "medium",
+                                          f"for i in range(len({coll})) 内访问 {coll}[i±1]，末位可能越界（IndexError）")
+                                break
+        self.generic_visit(node)
+
+    @staticmethod
+    def _as_name(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            try:
+                return ast.unparse(node)
+            except Exception:
+                return None
+        return None
+
+    # ---- 竞态条件：仅当文件真实使用线程 + 共享属性自增无锁 ----
+    def _has_lock_in_scope(self, node):
+        scope = self._enclosing_func(node)
+        if scope is None:
+            return False
+        for n in ast.walk(scope):
+            if isinstance(n, ast.With):
+                for item in n.items:
+                    try:
+                        if "lock" in ast.unparse(item.context_expr).lower() \
+                                or (item.optional_vars and "lock" in ast.unparse(item.optional_vars).lower()):
+                            return True
+                    except Exception:
+                        pass
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "acquire"):
+                return True
+        return False
+
+    def _check_race(self, tree):
+        if not self.has_threads:
+            return
+        for n in ast.walk(tree):
+            target = None
+            if (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute)
+                    and isinstance(n.target.value, ast.Name) and n.target.value.id == "self"):
+                target, op = n.target, n.op
+            elif (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Subscript)
+                    and isinstance(n.target.value, ast.Name)):
+                target, op = n.target, n.op
+            elif (isinstance(n, ast.Assign) and isinstance(n.value, ast.BinOp)
+                    and isinstance(n.targets[0], ast.Attribute)
+                    and isinstance(n.targets[0].value, ast.Name)
+                    and n.targets[0].value.id == "self"
+                    and isinstance(n.value.left, ast.Attribute)
+                    and ast.unparse(n.value.left) == ast.unparse(n.targets[0])):
+                target, op = n.targets[0], n.value.op
+            elif (isinstance(n, ast.Assign) and isinstance(n.value, ast.BinOp)
+                    and isinstance(n.targets[0], ast.Subscript)
+                    and isinstance(n.targets[0].value, ast.Name)
+                    and isinstance(n.value.left, ast.Subscript)
+                    and ast.unparse(n.value.left) == ast.unparse(n.targets[0])):
+                target, op = n.targets[0], n.value.op
+            if target is not None and isinstance(op, (ast.Add, ast.Sub)):
+                if isinstance(target, ast.Attribute):
+                    what = f"self.{target.attr}"
+                    if target.attr in ("lock", "mutex"):
+                        continue
+                else:
+                    what = f"{ast.unparse(target.value)}[{ast.unparse(target.slice)}]"
+                    if "lock" in what.lower() or "mutex" in what.lower():
+                        continue
+                if not self._has_lock_in_scope(target):
+                    self._add(target.lineno, "竞态条件", "high",
+                              f"多线程环境下共享变量 {what} 自增/自减无锁，可能竞态导致数据丢失")
+
+    # ---- TOCTOU：os.path.exists 后 open/remove/rename ----
+    def _is_exists_check(self, call):
+        return (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Attribute)
+                and isinstance(call.func.value.value, ast.Name)
+                and call.func.value.value.id == "os" and call.func.value.attr == "path"
+                and call.func.attr in ("exists", "isfile", "isdir", "islink"))
+
+    def _toctou_after(self, node, body):
+        for stmt in body:
+            if self._is_unsafe_after_exists(stmt):
+                self._add(node.lineno, "TOCTOU 竞争", "medium",
+                          "先检查文件存在再操作，存在时间窗口竞争（TOCTOU），建议直接操作并捕获异常")
+                return True
+        return False
+
+    def visit_Expr(self, node):
+        v = node.value
+        if self._is_exists_check(v):
+            self._toctou_after(node, self._body_after(node))
+        self.generic_visit(node)
+
+    def visit_If(self, node):
+        # 常见模式：if os.path.exists(x): 直接 open/remove —— TOCTOU
+        if self._is_exists_check(node.test) and not self._toctou_after(node, node.body):
+            # 若 if 体只是 return True，检查 else/后续也会用到（保持简单，仅报一次）
+            pass
+        self.generic_visit(node)
+
+    def _body_after(self, node):
+        for p in reversed(self._anc):
+            for attr in ("body", "orelse", "finalbody"):
+                lst = getattr(p, attr, None)
+                if isinstance(lst, list) and node in lst:
+                    idx = lst.index(node)
+                    return lst[idx + 1: idx + 11]
+        return []
+
+    @staticmethod
+    def _is_unsafe_after_exists(stmt):
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Call):
+                f = n.func
+                if isinstance(f, ast.Name) and f.id == "open":
+                    return True
+                if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                        and f.value.id in ("os", "shutil")
+                        and f.attr in ("remove", "rename", "rmtree", "unlink", "replace")):
+                    return True
+        return False
+
+    # ---- is 与字面量比较 / 字符串大小比较 ----
+    @staticmethod
+    def _is_literal(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, str, float)):
+            return True
+        if isinstance(node, (ast.List, ast.Dict, ast.Set, ast.Tuple)):
+            return True
+        return False
+
+    @staticmethod
+    def _is_str_expr(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return True
+        if isinstance(node, ast.JoinedStr):
+            return True
+        return False
+
+    def visit_Compare(self, node):
+        for op, right in zip(node.ops, node.comparators):
+            if isinstance(op, (ast.Is, ast.IsNot)) and self._is_literal(right):
+                self._add(node.lineno, "比较运算符错误", "medium",
+                          "使用 is/is not 比较字面量，应使用 ==/!=（is 比较对象身份而非值）")
+            elif isinstance(op, (ast.GtE, ast.LtE, ast.Gt, ast.Lt)) and \
+                    (self._is_str_expr(node.left) or self._is_str_expr(right)):
+                self._add(node.lineno, "比较运算符错误", "low",
+                          "字符串使用大小比较（>/</>=/<=），字符串比较无大小含义，应使用 ==/!=")
+        self.generic_visit(node)
+
+
+def _logic_suggestions(sev: Dict[str, int], total: int) -> List[str]:
     s = []
     if total == 0:
-        s.append("未发现明显性能问题，保持优化习惯 🎉")
+        s.append("未发现明显逻辑错误，代码逻辑清晰 🎉")
         return s
     if sev["high"] > 0:
-        s.append(f"发现 {sev['high']} 个高性能问题（O(n²)/N+1查询/递归爆炸），建议优先优化")
+        s.append(f"发现 {sev['high']} 个高风险逻辑错误（竞态条件），必须修复")
     if sev["medium"] > 0:
-        s.append(f"发现 {sev['medium']} 个中性能问题（内存泄漏/资源泄漏），建议排查")
-    s.append("O(n²)嵌套循环可考虑用字典/集合优化查找，N+1查询改用批量查询")
-    s.append("文件操作使用with语句自动释放资源，递归函数添加@lru_cache缓存")
+        s.append(f"发现 {sev['medium']} 个中风险问题（可变默认参数/边界条件），建议修复")
+    s.append("可变默认参数改用 None 作为默认值，函数内部初始化")
+    s.append("多线程共享变量使用 threading.Lock 保护，除法操作前检查除数非零")
     return s
 
 
-# ============================================================
-# 逻辑错误检测模块 (v4.0 新增)
-# ============================================================
-
 def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
-    """检测逻辑错误：比较运算符错误、边界条件、可变默认参数、除零风险、未初始化变量、竞态条件"""
-    issues = []
+    """检测逻辑错误（v4.5 AST 重写）：可变默认参数 / 除零风险 / 边界条件越界 /
+    竞态条件（仅真实使用线程）/ TOCTOU / is 与字面量比较 / 字符串大小比较。
+
+    基于 ast 精确判定，消除正则时代的误报。返回契约不变：
+    {total, grade, emoji, logic_score, severity, issues, suggestions}。
+    """
+    issues: List[Dict[str, Any]] = []
+    for _fpath, rel, lines, tree in _iter_py_ast(tree_files, root):
+        text = "\n".join(lines)
+        has_threads = bool(re.search(r"\bThread\s*\(|threading\.", text))
+        vis = _LogicVisitor(lines, rel, has_threads)
+        vis.visit(tree)
+        vis._check_race(tree)
+        issues.extend(vis.issues)
+
     severity_count = {"high": 0, "medium": 0, "low": 0}
-
-    for fpath in tree_files:
-        if not fpath.endswith(".py"):
-            continue
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                lines = fh.readlines()
-        except Exception:
-            continue
-
-        rel = os.path.relpath(fpath, root) if root else fpath
-
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-
-            # 1. 可变默认参数检测
-            if re.search(r'def\s+\w+\s*\([^)]*=\s*(\[\]|\{\}|\(\))', line):
-                issues.append({"file": rel, "line": i, "type": "可变默认参数",
-                               "severity": "medium",
-                               "desc": "函数默认参数使用可变对象（[]/{}/()），所有调用共享同一对象",
-                               "code": stripped[:100]})
-                severity_count["medium"] += 1
-
-            # 2. 比较运算符错误：if x = y（赋值而非比较）
-            if re.search(r'if\s+\w+\s*=\s*[^=]', line) and not re.search(r'==', line):
-                # 排除 := 海象运算符
-                if ':=' not in line:
-                    issues.append({"file": rel, "line": i, "type": "比较运算符错误",
-                                   "severity": "high",
-                                   "desc": "if语句中使用=而非==，可能是赋值而非比较",
-                                   "code": stripped[:100]})
-                    severity_count["high"] += 1
-
-            # 3. 除零风险检测（排除字符串中的/，如路径/api）
-            # 先移除字符串内容，避免误报路径中的/
-            clean_line = re.sub(r'["\'][^"\']*["\']', '""', line)
-            if re.search(r'/\s*(\w+)', clean_line) and not re.search(r'#.*除零|#.*zero', line, re.IGNORECASE):
-                divisor = re.search(r'/\s*(\w+)', clean_line)
-                if divisor:
-                    var = divisor.group(1)
-                    # 检查前面是否有除零检查
-                    has_check = False
-                    for j in range(max(0, i-10), i):
-                        if re.search(rf'if\s+{var}\s*[!=]=\s*0|if\s+{var}\s*[<>]', lines[j]):
-                            has_check = True
-                            break
-                    if not has_check and var not in ('len', '2', '100', '1024', '60', '24', '365',
-                                                       'tmp', 'var', 'api', 'dev', 'usr', 'home', 'etc',
-                                                       'opt', 'var', 'log', 'uploads', 'static'):
-                        # 简单变量除法且无检查
-                        if re.match(r'^[a-z_][a-z0-9_]*$', var) and len(var) > 1:
-                            issues.append({"file": rel, "line": i, "type": "除零风险",
-                                           "severity": "low",
-                                           "desc": f"除以变量{var}，未检查是否为0",
-                                           "code": stripped[:100]})
-                            severity_count["low"] += 1
-
-            # 4. 边界条件错误：range(len(x)) off-by-one
-            if re.search(r'range\s*\(\s*len\s*\(', line):
-                # 检查是否有 -1 或 +1 错误
-                if re.search(r'range\s*\(\s*len\s*\([^)]*\)\s*-\s*1\s*\)', line):
-                    issues.append({"file": rel, "line": i, "type": "边界条件",
-                                   "severity": "medium",
-                                   "desc": "range(len(x)-1)可能导致off-by-one，漏掉最后一个元素",
-                                   "code": stripped[:100]})
-                    severity_count["medium"] += 1
-
-            # 5. 比较运算符混淆：>= 用于应该用 == 的场景
-            if re.search(r'is_admin\s*>=\s*["\']admin["\']', line) or re.search(r'role\s*>=\s*["\']', line):
-                issues.append({"file": rel, "line": i, "type": "比较运算符错误",
-                               "severity": "high",
-                               "desc": "字符串比较使用>=，应使用==，字符串比较无大小意义",
-                               "code": stripped[:100]})
-                severity_count["high"] += 1
-
-            # 6. 逻辑运算符错误：or 用于应该用 and 的密码验证
-            if re.search(r'if\s+.*password.*or.*', line, re.IGNORECASE) and 'and' not in line:
-                if re.search(r'not\s+\w+\s+or\s+not', line):
-                    issues.append({"file": rel, "line": i, "type": "逻辑运算符错误",
-                                   "severity": "high",
-                                   "desc": "密码验证使用or而非and，任一条件满足即通过",
-                                   "code": stripped[:100]})
-                    severity_count["high"] += 1
-
-
-            # 6.5 TOCTOU竞争条件检测（v4.2新增）
-            if re.search(r'''os\.path\.(exists|isfile|isdir|islink)''', line):
-                for j in range(i, min(i+20, len(lines))):
-                    if re.search(r'''(open|os\.remove|os\.rename|shutil\.)''', lines[j]):
-                        issues.append({"file": rel, "line": i+1, "type": "TOCTOU竞争",
-                                       "severity": "medium", "desc": "检查文件存在后再操作，存在时间窗口竞争(TOCTOU)", "code": line.strip()[:100]})
-                        severity_count["medium"] += 1
-                        break
-
-            # 6.6 类型混淆检测（v4.2新增）
-            if re.search(r'''json\.loads''', line):
-                for j in range(i+1, min(i+10, len(lines))):
-                    if re.search(r'''(parsed|result|data)\.(get|\[)''', lines[j]) and "json.loads" not in lines[j]:
-                        issues.append({"file": rel, "line": j+1, "type": "类型混淆",
-                                       "severity": "medium", "desc": "json.loads返回值可能不是dict，直接调用.get()可能抛AttributeError", "code": lines[j].strip()[:100]})
-                        severity_count["medium"] += 1
-                        break
-
-            # 6.7 竞态条件增强检测（v4.4修复：仅在多线程环境下检测）
-            # 先判断当前文件是否包含多线程/多进程代码
-            has_multithreading = any(re.search(r'(threading|Thread|multiprocessing|concurrent\.futures|asyncio)', l) for l in lines)
-            if has_multithreading and re.search(r'(Thread|threading)\.', line):
-                # 检查函数内是否有共享变量修改无锁
-                for j in range(max(0, i-15), min(i+15, len(lines))):
-                    if re.search(r'(failed_attempts|counter|count|total|cache|requests|sessions)\s*[+*]?=', lines[j]):
-                        has_lock = False
-                        for k in range(max(0, j-5), min(j+5, len(lines))):
-                            if re.search(r'(lock|Lock|mutex|acquire|release|with.*lock)', lines[k], re.IGNORECASE):
-                                has_lock = True
-                                break
-                        if not has_lock:
-                            issues.append({"file": rel, "line": j+1, "type": "竞态条件",
-                                           "severity": "high", "desc": "多线程环境下共享变量修改无锁，可能导致竞态条件/数据丢失", "code": lines[j].strip()[:100]})
-                            severity_count["high"] += 1
-                            break
-
-            # 7. 竞态条件检测：多线程共享变量无锁
-            if re.search(r'threading\.Thread|Thread\s*\(', line):
-                # 检查后续代码中是否有共享变量操作无锁
-                pass  # 简化检测，在类级别检测
-
-        # 8. 类级别竞态条件检测
-        full_text = "".join(lines)
-        if 'threading' in full_text or 'Thread' in full_text:
-            for i, line in enumerate(lines, 1):
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    continue
-                if re.search(r'self\.\w+\s*=\s*self\.\w+\s*[+\-*/]\s*', line):
-                    # 检查是否有锁
-                    has_lock = False
-                    for j in range(max(0, i-5), i):
-                        if re.search(r'with\s+.*lock|acquire\(\)|Lock\(\)', lines[j]):
-                            has_lock = True
-                            break
-                    if not has_lock and 'threading' in full_text:
-                        issues.append({"file": rel, "line": i, "type": "竞态条件",
-                                       "severity": "high",
-                                       "desc": "多线程环境下共享变量自增操作无锁保护，可能竞态条件",
-                                       "code": stripped[:100]})
-                        severity_count["high"] += 1
-
+    for i in issues:
+        severity_count[i["severity"]] += 1
     total = len(issues)
     logic_score = min(100, severity_count["high"] * 12 + severity_count["medium"] * 5 + severity_count["low"] * 2)
     if logic_score >= 50:
@@ -1835,17 +2055,3 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
     return {"total": total, "grade": grade, "emoji": emoji, "logic_score": logic_score,
             "severity": severity_count, "issues": issues,
             "suggestions": _logic_suggestions(severity_count, total)}
-
-
-def _logic_suggestions(sev: Dict[str, int], total: int) -> List[str]:
-    s = []
-    if total == 0:
-        s.append("未发现明显逻辑错误，代码逻辑清晰 🎉")
-        return s
-    if sev["high"] > 0:
-        s.append(f"发现 {sev['high']} 个高风险逻辑错误（比较运算符/竞态条件），必须修复")
-    if sev["medium"] > 0:
-        s.append(f"发现 {sev['medium']} 个中风险问题（可变默认参数/边界条件），建议修复")
-    s.append("可变默认参数改用None作为默认值，函数内部初始化")
-    s.append("多线程共享变量使用threading.Lock保护，除法操作前检查除数非零")
-    return s

@@ -411,10 +411,16 @@ def _dispatch_sandbox(rest: List[str]) -> None:
         print(result.format_summary())
         if result.coverage:
             cov = result.coverage
-            print(f"\n📊 覆盖率: {cov.get('coverage', 0):.1%}")
-            print(f"   总行数: {cov.get('total', 0)}, 已覆盖: {cov.get('covered', 0)}")
-            if cov.get("uncovered_lines"):
-                print(f"   未覆盖行: {cov['uncovered_lines'][:20]}")
+            # v4.5 统一格式：files + overall_coverage（restricted/subprocess 一致）
+            overall = cov.get("overall_coverage", 0)
+            print(f"\n📊 覆盖率: {overall:.1%}")
+            for fname, finfo in cov.get("files", {}).items():
+                covered = len(finfo.get("lines_covered", []))
+                total = len(finfo.get("lines_total", []))
+                uncovered = sorted(set(finfo.get("lines_total", [])) - set(finfo.get("lines_covered", [])))
+                print(f"   {fname}: {covered}/{total} 行")
+                if uncovered:
+                    print(f"   未覆盖行: {uncovered[:20]}")
     elif sub in ("test", "测试") and len(rest) >= 2:
         runner.enable()
         filepath = rest[1]

@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.4.1"                # 工具版本（v4.0.0：新增安全/性能/逻辑三大检测模块+死代码误报改进）
+VERSION = "4.5.0"                # 工具版本（v4.5：性能/逻辑检测 AST 精确重写 + 沙箱覆盖率/安全修复）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -187,6 +187,10 @@ def scan(root: str, ignore_patterns: Optional[List[str]] = None,
     ignore_patterns: 相对路径 glob（**/vendor/**、*.min.js、build/ 等）；
     ignore_dirs: 目录名列表（精确匹配，整棵子树跳过）。"""
     result: Dict[str, List[str]] = {"weed": [], "tree": [], "other": []}
+    # v4.5 修复：单文件项目 - os.walk(文件) 返回空，需单独处理
+    if os.path.isfile(root):
+        result[classify(root)].append(root)
+        return result
     ignore_dirs = set(ignore_dirs or [])
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
