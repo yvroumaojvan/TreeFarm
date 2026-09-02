@@ -677,6 +677,13 @@ def main() -> None:
         return
 
     root = os.path.abspath(args[0])
+    # v4.6：路径不存在时给出友好提示，而不是静默退出/报 Traceback
+    if not os.path.exists(root):
+        print(f"❌ 路径不存在: {root}")
+        print("💡 请检查项目路径是否写错（可指向文件夹或单个代码文件）")
+        print("   查看帮助: python3 tree_farm.py --help")
+        return
+
     farm = TreeFarm(root)
     try:
         if "--repl" in args or any(a in ("交互", "交互模式", "问答模式") for a in args):

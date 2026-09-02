@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.6.0] - 2026-09-03
+
+### 安全检测规则补齐（对应插件优化清单 P2）
+- **扫描范围扩展**：从 `.py` 扩展到 `.js/.jsx/.ts/.tsx/.html/.htm/.vue`（前端代码也能检出漏洞）
+- **新增 XXE 检测**：`etree/ET/ElementTree/xml.etree.ElementTree/lxml/minidom/sax/expat` 无防护解析 XML
+- **新增开放重定向检测**：`redirect(...)` 与 `Location` 响应头目标来自 `request`/`args`/`form`/`params`/`next` 等用户输入
+- **新增认证绕过检测**：含敏感操作/后台/支付路径的路由，全文件无认证装饰器（`login_required`/`auth`/`jwt_required` 等）→ 未授权访问风险（文件级判定，只报一次）
+- **XSS 规则扩充**：`innerHTML`/`outerHTML`/`document.write`/`insertAdjacentHTML`/Vue `v-html`/React `dangerouslySetInnerHTML`/Jinja2 `|safe`
+
+### 性能检测补齐（资源泄漏）
+- **新增资源泄漏检测**：函数内 `open()`/`socket.socket()` 绑定变量，既不在 `with` 中、函数内也无 `.close()` → 文件句柄/连接泄漏（AST 精确，`with`/`try-finally` 模式零误报）
+
+### 体验优化（P1）
+- **路径不存在友好提示**：CLI 输入错误路径输出 ❌ + 💡 排查建议 + 帮助指引，不再静默退出
+
+### 测试
+- **257 → 279 测试全绿**：新增 `test_v46_security.py` 22 项（XXE 3 种/开放重定向 3 种/认证绕过正反例/前端 XSS 3 语言/资源泄漏 6 种正反例/干净文件零误报/CLI 路径提示/restricted 多语言回归）
+
 ## [4.5.0] - 2026-09-02
 
 ### 性能/逻辑检测：正则堆砌 → AST 精确重写（本次核心）

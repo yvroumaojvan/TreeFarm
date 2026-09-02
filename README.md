@@ -77,12 +77,12 @@ TreeOfThought+TreeFarm(融合版)/
 │       ├── tree-search.js      #   ★ 树搜索管理器（零依赖 Node，v3 新增）
 │       ├── render-tree.js      #   推理 JSON / 搜索状态 → 文字符号树（含状态徽章）
 │       └── test_tree_search.js #   树搜索 14 个测试（node test_tree_search.js）
-├── tree-farm/                  # ★ 技能 2：树场 v4.5.0（Agent Skills 标准格式）
-│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.5.0 同步）
+├── tree-farm/                  # ★ 技能 2：树场 v4.6.0（Agent Skills 标准格式）
+│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.6.0 同步）
 │   └── scripts/
-│       ├── tree_farm.py        #   树场引擎 v4.5.0 入口（纯 Python 标准库，SQLite 存储）
+│       ├── tree_farm.py        #   树场引擎 v4.6.0 入口（纯 Python 标准库，SQLite 存储）
 │       ├── treefarm/           #   ★ 多模块包（common/parser/storage/config/analysis/core/cli/sandbox）
-│       ├── tests/              #   257 个 unittest 测试（python3 -m unittest discover -s tests）
+│       ├── tests/              #   279 个 unittest 测试（python3 -m unittest discover -s tests）
 │       └── apk_analyze.sh      #   APK 一条龙脚本（反编译 → 树场）
 └── examples/
     ├── 完整输出示例.md          # 思维树文字树效果（完整/紧凑/ASCII）
@@ -166,7 +166,7 @@ python3 tree-farm/scripts/tree_farm.py examples/demo_project --architecture
 | 原版包 | 本融合版（v3.2 已升级） |
 |-------|---------|
 | 思维树独立包 | `tree-of-thought/` 技能并入，**升级为真搜索算法版**（六步流程 → 搜索循环 + 评分/剪枝/回溯 + tree-search.js） |
-| 树场独立包 | `tree-farm/` 技能并入，**升级为 v4.5.0**（函数级分析 + 真增量更新 + SQLite 存储 + 5 大代码分析 + 沙箱动态测试 + 静态AST + 中文命令菜单 + AST 精确性能/逻辑检测 + 257 个测试） |
+| 树场独立包 | `tree-farm/` 技能并入，**升级为 v4.6.0**（函数级分析 + 真增量更新 + SQLite 存储 + 5 大代码分析 + 沙箱动态测试 + 静态AST + 中文命令菜单 + AST 精确性能/逻辑检测 + 安全规则补齐 XXE/开放重定向/认证绕过/前端XSS + 资源泄漏 + 279 个测试） |
 | 各自独立的 install.sh | 合并为一个，一次装两个 |
 | 各自独立的 README/教程/粘贴用 | 合并为融合版全套文档 |
 | （原版 bug）install.sh 不复制 scripts/ | 已修复：脚本收进技能目录内，复制即完整 |
@@ -223,7 +223,7 @@ A：**大项目 + 多轮排查**（实测 21MB APK 省 97.9% token）。小项�
 | 一句话自定义 | 「思维树 3 分支 1 轮」「思维树束宽 6」「思维树 dfs」「恢复默认」 |
 | 纯聊天降级 | 无终端环境自动降级为「手动模拟搜索」（评分/剪枝/回溯照做，手记状态） |
 
-### 🌳 树场 TreeFarm v4.5.0（管「读哪些、怎么省」）
+### 🌳 树场 TreeFarm v4.6.0（管「读哪些、怎么省」）
 
 | 功能 | 说明 |
 |------|------|
@@ -266,8 +266,8 @@ A：**大项目 + 多轮排查**（实测 21MB APK 省 97.9% token）。小项�
 
 | | |
 |---|---|
-| **🔒 安全漏洞检测** | `--security` / `分析 安全`：SQL注入/XSS/命令注入/路径遍历/硬编码密码/反序列化/弱哈希/时序攻击/ReDoS/SSRF/XXE 等 20+ 种；v4.5 新增污点变量跟踪（跨行数据流：`request.args.get` → 变量 → 拼接传播） |
-| **⚡ 性能问题检测** | `--performance` / `分析 性能`：循环内字符串拼接/线性查找/`re.compile`、N+1 查询、递归无终止/无缓存（v4.5 起 AST 精确检测，`x+=1` 不再误报） |
+| **🔒 安全漏洞检测** | `--security` / `分析 安全`：SQL注入/XSS/命令注入/路径遍历/硬编码密码/反序列化/弱哈希/时序攻击/ReDoS/SSRF/XXE 等 20+ 种；v4.5 新增污点变量跟踪（跨行数据流：`request.args.get` → 变量 → 拼接传播）；v4.6 新增 XXE/开放重定向/认证绕过检测 + 前端 XSS（`.js`/`.html`/`.vue` 的 `innerHTML`/`v-html`/`dangerouslySetInnerHTML`） |
+| **⚡ 性能问题检测** | `--performance` / `分析 性能`：循环内字符串拼接/线性查找/`re.compile`、N+1 查询、递归无终止/无缓存（v4.5 起 AST 精确检测，`x+=1` 不再误报）；v4.6 新增资源泄漏检测（`open`/`socket` 未 `with` 且无 `close`） |
 | **🧩 逻辑错误检测** | `--logic` / `分析 逻辑`：可变默认参数/除零风险/边界越界/竞态（仅真实多线程）/TOCTOU/`is` 比较字面量（v4.5 起 AST 精确检测，误报大幅下降） |
 | **🧪 沙箱动态测试** | `--sandbox run/test/trace/cov`：安全沙箱执行代码 + 自动多输入生成器（30 组边界/恶意输入）触发休眠 bug；v4.5 补 subprocess 代码级黑名单防护 + AST 可执行行号精确覆盖率 |
 | **🔬 轻量 AST 辅助** | `--static-ast`：AST 沙箱绕过/动态执行/装饰器注册/类型混淆（默认关闭） |

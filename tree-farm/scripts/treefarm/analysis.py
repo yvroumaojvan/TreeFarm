@@ -1086,12 +1086,15 @@ def calculate_debt(tree_files: List[str], bank: Any, module_map: Dict[str, str],
 # ============================================================
 
 def detect_security_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
-    """检测安全漏洞：SQL注入、XSS、命令注入、路径遍历、硬编码密码、不安全反序列化、弱哈希"""
+    """检测安全漏洞：SQL注入、XSS、命令注入、路径遍历、硬编码密码、不安全反序列化、弱哈希、
+    SSRF、JWT、XXE、开放重定向、认证绕过"""
+    _SECURITY_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".vue"}
+
     issues = []
     severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
     for fpath in tree_files:
-        if not fpath.endswith(".py"):
+        if os.path.splitext(fpath)[1].lower() not in _SECURITY_EXTS:
             continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
@@ -1404,6 +1407,15 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''escape\s*=\s*False''', "XSS：关闭转义"),
                 (r'''autoescape\s*=\s*False''', "XSS：关闭自动转义"),
                 (r'''response\.write\s*\(\s*request\.''', "XSS：直接输出用户输入"),
+                # v4.6 补充：前端 DOM 与框架侧 XSS（配合扩展名扩展覆盖 JS/HTML/Vue/React）
+                (r'''\.innerHTML\s*=\s*''', "XSS：innerHTML 直接写入（若内容含用户输入则存储型/反射型XSS）"),
+                (r'''document\.write\s*\(\s*''', "XSS：document.write 输出 HTML（用户输入需转义）"),
+                (r'''\.outerHTML\s*=\s*''', "XSS：outerHTML 直接写入"),
+                (r'''insertAdjacentHTML\s*\(\s*''', "XSS：insertAdjacentHTML 插入 HTML"),
+                (r'''v-html\s*=\s*["']''', "XSS：Vue v-html 渲染（仅可用于可信内容）"),
+                (r'''dangerouslySetInnerHTML\s*=\s*''', "XSS：React dangerouslySetInnerHTML（仅可用于可信内容）"),
+                (r'''\|[\s]*safe\b''', "XSS：Jinja2 |safe 过滤器输出未转义内容"),
+                (r'''style=["']text/html["'][^>]*srcdoc''', "XSS：iframe srcdoc 注入 HTML"),
             ]
             for pattern, desc in xss_patterns:
                 if re.search(pattern, line):
@@ -1452,6 +1464,42 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     severity_count["high"] += 1
                     break
 
+            # 9.5 XXE检测（v4.6新增：补足XML外部实体注入盲区）
+            xxe_patterns = [
+                (r'''(?:etree|ET|ElementTree|xml\.etree\.ElementTree)\.(parse|XML|fromstring)\s*\(''', "XXE：ElementTree/lxml 解析XML未禁用外部实体（entity 注入风险）"),
+                (r'''minidom\.parse\s*\(''', "XXE：minidom 解析XML可能允许外部实体注入"),
+                (r'''sax\.parse\s*\(''', "XXE：SAX 解析XML可能允许外部实体注入"),
+                (r'''expat\.ParserCreate\s*\(''', "XXE：expat 解析XML默认允许实体展开"),
+                (r'''XMLParser\s*\(\s*[^)]*resolve_entities\s*=\s*True''', "XXE：XMLParser 显式开启实体解析"),
+                (r'''(no_network|load_dtd|resolve_entities)\s*=\s*False''', "XXE：XML 解析显式禁用安全防护（no_network/load_dtd=False）"),
+            ]
+            for pattern, desc in xxe_patterns:
+                if re.search(pattern, line):
+                    issues.append({"file": rel, "line": i, "type": "XXE",
+                                   "severity": "high", "desc": desc, "code": stripped[:100]})
+                    severity_count["high"] += 1
+                    break
+
+            # 9.6 开放重定向检测（v4.6新增：跳转目标来自用户输入）
+            open_redirect_patterns = [
+                (r'''redirect\s*\(\s*(request\.|params\[|args\[|form\[|data\.|next\b|url\b)''',
+                 "开放重定向：redirect 目标来自用户可控输入"),
+                (r'''redirect\s*\([^)]*(request\.args|request\.values|request\.form|request\.get)''',
+                 "开放重定向：redirect 拼接用户提交参数"),
+                (r'''(Location|location)\s*=\s*(request\.|params\[|args\[|form\[)''',
+                 "开放重定向：响应头 Location 来自用户输入"),
+                (r'''headers\s*\[\s*["'](?:Location|location)["']\s*\]\s*=\s*(request\.|params\[|args\[|form\[)''',
+                 "开放重定向：响应头 headers['Location'] 来自用户输入"),
+                (r'''return\s+(redirect|Response)\s*\(\s*next\b''',
+                 "开放重定向：next 参数直接用于跳转（应校验白名单）"),
+            ]
+            for pattern, desc in open_redirect_patterns:
+                if re.search(pattern, line):
+                    issues.append({"file": rel, "line": i, "type": "开放重定向",
+                                   "severity": "medium", "desc": desc, "code": stripped[:100]})
+                    severity_count["medium"] += 1
+                    break
+
             # 10. JWT完整漏洞检测（v4.5新增：原仅有硬编码secret）
             jwt_patterns = [
                 (r'''jwt\.decode\s*\([^)]*verify\s*=\s*False''',
@@ -1473,6 +1521,28 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
                     severity_count["high"] += 1
                     break
+
+        # v4.6 新增：认证绕过检测（文件级扫描，只报一次避免刷屏）
+        # 判定：文件含路由装饰器 + 敏感操作/敏感路径（删除/修改/后台/支付等），
+        # 但整个文件未出现任何认证装饰器（login_required / auth / jwt_required 等）→ 未授权访问风险
+        sensitive_route_line = 0
+        auth_decorator_found = False
+        for i, line in enumerate(lines, 1):
+            strip_l = line.strip()
+            if strip_l.startswith("#"):
+                continue
+            if re.search(r'''@\w*(login_required|auth\w*|permission\w*|jwt_required|token_required|admin_required|require_admin|ensure_admin|is_authenticated|requires_auth)''', line):
+                auth_decorator_found = True
+            if re.search(r'''@(app\.route|bp\.route|router\.\w+|\.route)\s*\(''', strip_l):
+                if re.search(r'''(delete|remove|drop|admin|reset|支付|secret|token|password|密码|权限|grant|upload|export)''', strip_l, re.IGNORECASE):
+                    if sensitive_route_line == 0:
+                        sensitive_route_line = i
+        if sensitive_route_line > 0 and not auth_decorator_found:
+            issues.append({"file": rel, "line": sensitive_route_line, "type": "认证绕过",
+                           "severity": "high",
+                           "desc": "含敏感操作/后台/支付等路径的路由，整个文件未发现认证装饰器（login_required/auth/jwt_required等），存在未授权访问风险",
+                           "code": lines[sensitive_route_line - 1].strip()[:100]})
+            severity_count["high"] += 1
 
         # v4.5 新增：跨行污点跟踪检测（污点变量流入危险 sink 才报）
         # 解决「用户输入先赋给变量，变量再拼进危险函数」跨行数据流漏报问题
@@ -1675,8 +1745,73 @@ class _PerfVisitor(ast.NodeVisitor):
                           "循环内重复调用 re.compile()，正则每次编译，建议提到循环外复用")
         self.generic_visit(node)
 
+    # ---- v4.6：资源泄漏检测（open/socket 未用 with 且函数内无 close()） ----
+    def _check_resource_leaks(self, node):
+        """函数体内的资源泄漏：open()/socket.socket() 绑定到变量后，
+        既不在 with 语句中，函数内也没有该变量的 .close() 调用。
+        文件句柄/连接长期不释放，最终导致句柄耗尽（EmittedError: too many open files）。
+        """
+        try:
+            parent: Dict[ast.AST, ast.AST] = {}
+            for s in ast.walk(node):
+                for child in ast.iter_child_nodes(s):
+                    parent[child] = s
+
+            # 1. 收集函数体内所有 X.close(...) 调用涉及的变量名
+            closed: Set[str] = set()
+            for s in ast.walk(node):
+                if (isinstance(s, ast.Call) and isinstance(s.func, ast.Attribute)
+                        and s.func.attr == "close"
+                        and isinstance(s.func.value, ast.Name)):
+                    closed.add(s.func.value.id)
+
+            # 2. 遍历 open(...)/socket.socket(...) 调用，定位绑定变量与上下文
+            for s in ast.walk(node):
+                if not isinstance(s, ast.Call):
+                    continue
+                fun = s.func
+                is_open = isinstance(fun, ast.Name) and fun.id == "open"
+                is_sock = (isinstance(fun, ast.Attribute) and fun.attr == "socket"
+                           and isinstance(fun.value, ast.Name) and fun.value.id == "socket")
+                if not (is_open or is_sock):
+                    continue
+
+                p = parent.get(s)
+                # 3. 绑定变量：f = open(...) / f: Type = open(...)
+                var = None
+                if isinstance(p, ast.Assign) and len(p.targets) == 1 and isinstance(p.targets[0], ast.Name):
+                    var = p.targets[0].id
+                elif isinstance(p, ast.AnnAssign) and isinstance(p.target, ast.Name):
+                    var = p.target.id
+                if var is None:
+                    continue  # 无绑定（如 open(x).read() 链式写法）不使用句柄，跳过
+
+                # 4. 排除 with 语句中的 open：with open(...) as f:
+                in_with_item = False
+                q = p
+                while q is not None:
+                    if isinstance(q, ast.With):
+                        for item in q.items:
+                            if item.context_expr is s:
+                                in_with_item = True
+                                break
+                        break
+                    q = parent.get(q)
+                if in_with_item:
+                    continue
+
+                # 5. 函数内有 var.close() 调用（含 try/finally 模式）→ 安全
+                if var in closed:
+                    continue
+
+                self._add(s.lineno, "资源泄漏", "medium",
+                          f"资源 {var} 由 {'open()' if is_open else 'socket.socket()'} 创建，未使用 with 且函数内无 {var}.close()，可能泄漏文件句柄/连接，建议改用 with 或补充 close()")
+        except Exception:
+            pass
+
     # ---- 递归无终止条件 / 无缓存 ----
     def visit_FunctionDef(self, node):
+        self._check_resource_leaks(node)
         name = node.name
         has_self_call = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                             and n.func.id == name for n in ast.walk(node))
@@ -1721,15 +1856,16 @@ def _perf_suggestions(sev: Dict[str, int], total: int) -> List[str]:
     if sev["high"] > 0:
         s.append(f"发现 {sev['high']} 个高性能问题（N+1 查询），建议优先优化")
     if sev["medium"] > 0:
-        s.append(f"发现 {sev['medium']} 个中性能问题（循环内 O(n²) 操作/字符串拼接），建议排查")
+        s.append(f"发现 {sev['medium']} 个中性能问题（循环内 O(n²) 操作/字符串拼接/资源泄漏），建议排查")
     s.append("循环内 in/index/count 线性查找可先转 set/dict 再判断，循环内 re.compile 提到循环外")
     s.append("循环内字符串拼接改用 ''.join()，数据库查询移出循环改为批量查询")
+    s.append("文件/连接资源统一用 with 语句管理，避免句柄泄漏")
     return s
 
 
 def detect_performance_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
-    """检测性能问题（v4.5 AST 重写）：循环内字符串拼接 / 循环内线性查找(O(n²)) /
-    循环内 re.compile / N+1 查询 / 递归无终止。
+    """检测性能问题（v4.5 AST 重写，v4.6 加资源泄漏）：循环内字符串拼接 / 循环内线性查找(O(n²)) /
+    循环内 re.compile / N+1 查询 / 递归无终止 / open/socket 资源泄漏。
 
     基于 ast 模块单遍遍历，只在“真循环体内”判定，注释、字符串、方法定义不再误报。
     返回契约不变：{total, grade, emoji, perf_score, severity, issues, suggestions}。
