@@ -5,6 +5,38 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.7.0] - 2026-09-04
+
+### ✨ 重大升级：Grader 化（把 TreeFarm 从「扫 bug 工具」培养成「能评估程序好坏、支撑后续决策」的评审系统）
+
+#### 新功能：项目功能画像（上下文感知检测）
+- **`--spec "功能描述"`**：让被检者输入被检测项目的所有功能（如"这是一个 Flask 博客系统，用户可注册登录、发文章、评论"），树场自动解析出技术栈（web/数据库/认证/文件/异步…）与重点检测类型
+- **`--spec-read`**：AI 自己读项目——扫描 README/docs/入口 docstring 自动推断功能画像，零依赖启发式，无需 LLM key 也能用
+- **上下文感知报告**：带画像跑 `--security`/`--performance`/`--logic`/`--all-checks` 时，报告开头显示「项目功能画像」，与核心功能相关的问题标记 🎯，抓 bug / 修 bug 更精准
+
+#### 新功能：Grader 综合评分与趋势
+- **`--grade`**：六维健康度（安全/逻辑/性能/结构/质量/技术债务）加权出综合分（0~100）+ 等级（A+~F）+ 短板优先的改进方向建议
+- **`--grade-diff`**：与上次评分对比，输出各维度 📈/📉 变化，让"进步多少"可量化可追踪（评分存基因库 meta）
+- 支持 `--grade "功能描述"` 一步到位：画像 + 评分
+
+#### 逻辑检测增强（对应金标准报告 10.3 高优 1/2/4/5 项）
+- **新增 API 契约检测**：同一家族公开方法委托对象不一致（如 tornado#1：4 个方法用 `self.ws_connection`，唯独 1 个用 `self.stream`）→ 报「API契约」并给修复建议（🔧 修复字段，grader 决策支撑）
+- **新增抽象方法完整性检测**：继承 ABC 的具体子类未实现父类抽象方法 → 报「抽象方法未实现」，附修复建议
+- **异步竞态降误报**：用 AST 判断真实线程创建（`threading.Thread`/`ThreadPoolExecutor`），纯 asyncio 文件不再误报竞态；字符串/规则库里的 "threading.Thread" 字样不再误当线程（自检误报根源修复）
+- **测试目录降级**：`test/tests` 目录里检出到的问题标记 `scope=test`、单独计数（🧪），不参与核心风险评分——测试用例本身常故意构造脏数据/越权场景
+
+#### 安全检测误报优化
+- **SQL 注入 sink 排除执行器**：`executor.execute()`/`runner`/`run_code` 等代码执行器不再误报 SQL 注入
+- **测试目录降级同安全一致**：不拉低核心 risk_score
+
+#### 性能优化
+- **AST 解析缓存**：同一文件多次检测（`--all-checks`/`--grade`）只 parse 一次（按 mtime+size 失效），大项目扫描提速
+
+#### 工程/文档
+- 新增 `docs/treefarm-ci.yml.example`：官方 GitHub Actions 集成模板（push/PR 自动跑 --grade）
+- 全部模块 docstring 版本标注统一到 v4.7；README/CHANGELOG 同步
+- **测试 279 → 300 全绿**：新增 `test_v47_grader.py`（功能画像/AI自读/综合评分/趋势/契约检测/异步竞态/测试目录降级 21 项）
+
 ## [4.6.0] - 2026-09-03
 
 ### 安全检测规则补齐（对应插件优化清单 P2）

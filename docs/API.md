@@ -1,7 +1,7 @@
 # TreeFarm API 文档
 
 > 树场机制的 Python API。零依赖（纯标准库），`import tree_farm as tf` 全量可用。
-> 本文档覆盖 v3.7：入口聚合导出 + 核心类 + 分析函数（含 v3.7 新增 Rust/代码异味/REPL）。
+> 本文档覆盖 v4.7：入口聚合导出 + 核心类 + 分析函数（含 v4.7 Grader 化 spec 模块 / 契约检测 / v3.7 新增 Rust/代码异味/REPL）。
 
 ## 导入方式
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 树场主体（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 树场主体（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：TreeFarm 主类（建库/增量更新/小鸟机制/LLM 侦察/简报/代码分析/调用图/查重/修复协议）。
 组装 common / parser / storage / config / analysis 各层。
@@ -45,6 +45,7 @@ class TreeFarm:
         self.module_map: Dict[str, str] = {}
         self.symbol_map: Dict[str, List[str]] = {}   # 符号 → [文件...]（跨文件 call 验证用）
         self._symbol_map_ready = False               # 惰性构建标志（v3.2：增量扫描免全量符号表）
+        self._spec_ctx: Optional[Dict[str, Any]] = None   # v4.7：项目功能画像（--spec/--spec-read 注入）
 
     # ===== 建库 / 增量更新 =====
     def plant(self, progress: Optional[Callable[[int, int, str], None]] = None) -> Tuple[bool, Dict[str, int]]:
@@ -570,12 +571,17 @@ class TreeFarm:
         """安全漏洞检测（v4.0 新增，--security）"""
         from .analysis import detect_security_issues
         result = detect_security_issues(self.scanned["tree"], root=self.root)
-        issues = result["issues"]
+        issues = self._mark_spec_issues(result["issues"])
         sev = result["severity"]
-        lines = ["=" * 56, "🔒 安全漏洞检测报告（v4.0）", "=" * 56]
+        lines = [self._spec_header().rstrip("\n")]
+        lines.append("=" * 56)
+        lines.append("🔒 安全漏洞检测报告（v4.0）")
+        lines.append("=" * 56)
         lines.append(f"风险评分: {result['risk_score']}/100 | 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个安全问题"
                      f"（严重 {sev['critical']} / 高危 {sev['high']} / 中危 {sev['medium']} / 低危 {sev['low']}）")
+        if result.get("test_issues"):
+            lines.append(f"🧪 其中 {result['test_issues']} 个在测试代码里（不参与评分，测试用例本身常含故意构造的脏数据）")
         lines.append("")
         if not issues:
             lines.append("✅ 未发现明显安全漏洞！")
@@ -603,12 +609,17 @@ class TreeFarm:
         """性能问题检测（v4.0 新增，--performance）"""
         from .analysis import detect_performance_issues
         result = detect_performance_issues(self.scanned["tree"], root=self.root)
-        issues = result["issues"]
+        issues = self._mark_spec_issues(result["issues"])
         sev = result["severity"]
-        lines = ["=" * 56, "⚡ 性能问题检测报告（v4.0）", "=" * 56]
+        lines = [self._spec_header().rstrip("\n")]
+        lines.append("=" * 56)
+        lines.append("⚡ 性能问题检测报告（v4.0）")
+        lines.append("=" * 56)
         lines.append(f"性能评分: {result['perf_score']}/100 | 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个性能问题"
                      f"（高 {sev['high']} / 中 {sev['medium']} / 低 {sev['low']}）")
+        if result.get("test_issues"):
+            lines.append(f"🧪 其中 {result['test_issues']} 个在测试代码里（不参与评分）")
         lines.append("")
         if not issues:
             lines.append("✅ 未发现明显性能问题！")
@@ -635,12 +646,17 @@ class TreeFarm:
         """逻辑错误检测（v4.0 新增，--logic）"""
         from .analysis import detect_logic_issues
         result = detect_logic_issues(self.scanned["tree"], root=self.root)
-        issues = result["issues"]
+        issues = self._mark_spec_issues(result["issues"])
         sev = result["severity"]
-        lines = ["=" * 56, "🐛 逻辑错误检测报告（v4.0）", "=" * 56]
+        lines = [self._spec_header().rstrip("\n")]
+        lines.append("=" * 56)
+        lines.append("🐛 逻辑错误检测报告（v4.0）")
+        lines.append("=" * 56)
         lines.append(f"逻辑评分: {result['logic_score']}/100 | 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个逻辑问题"
                      f"（高 {sev['high']} / 中 {sev['medium']} / 低 {sev['low']}）")
+        if result.get("test_issues"):
+            lines.append(f"🧪 其中 {result['test_issues']} 个在测试代码里（不参与评分）")
         lines.append("")
         if not issues:
             lines.append("✅ 未发现明显逻辑错误！")
@@ -655,6 +671,8 @@ class TreeFarm:
                     lines.append(f"  [{iss['type']}] {iss['file']}:{iss['line']}")
                     lines.append(f"      {iss['desc']}")
                     lines.append(f"      代码: {iss['code']}")
+                    if iss.get("fix"):
+                        lines.append(f"      🔧 修复: {iss['fix']}")
                 if len(group) > 25:
                     lines.append(f"  ... 还有 {len(group) - 25} 个")
                 lines.append("")
@@ -665,7 +683,10 @@ class TreeFarm:
 
     def all_checks(self) -> str:
         """全量检测（v4.0 新增，--all-checks）"""
-        lines = ["\n" + "=" * 60, "🌳 TreeFarm v4.0 全量检测报告", "=" * 60]
+        lines = [self._spec_header().rstrip("\n")]
+        lines.append("\n" + "=" * 60)
+        lines.append(f"🌳 TreeFarm v{VERSION} 全量检测报告")
+        lines.append("=" * 60)
         lines.append("\n" + self.dead_code())
         lines.append("\n" + self.circular_deps())
         lines.append("\n" + self.complexity())
@@ -914,3 +935,140 @@ class TreeFarm:
                  "            3. 修正代码 4. 重新整体排查",
                  "  ⚠️ 需用户同意后才能执行修复（默认逐处确认）"]
         return "\n".join(lines)
+
+    # ===== v4.7 grader 化：项目功能画像 / 综合评分 / 趋势 =====
+
+    def set_spec(self, description: str) -> Dict[str, Any]:
+        """注入「被检项目功能描述」（--spec "..."），构建功能画像。"""
+        from .spec import build_spec
+        self._spec_ctx = build_spec(description)
+        return self._spec_ctx
+
+    def spec_read(self) -> Dict[str, Any]:
+        """AI 自读项目功能画像（--spec-read）：读 README/docs/入口 docstring 推断。"""
+        from .spec import autodetect_spec
+        self._spec_ctx = autodetect_spec(self.scanned["tree"], root=self.root)
+        return self._spec_ctx
+
+    def spec(self) -> str:
+        """显示当前功能画像（--spec / --spec-read / 未提供时给引导）。"""
+        from .spec import format_spec
+        ctx = self._spec_ctx
+        if ctx is None:
+            ctx = {"stack": [], "desc": "", "focused": []}
+        lines = [format_spec(ctx)]
+        if ctx.get("focused"):
+            lines.append("")
+            lines.append("💡 结合功能上下文，抓 bug / 修 bug 会更精准：")
+            lines.append("   报告会把问题按「与哪个功能相关」标注，并优先展示与核心功能相关的问题")
+        return "\n".join(lines)
+
+    def _spec_header(self) -> str:
+        """检测报告开头的功能画像段（有 spec 时显示，无则不打扰）。"""
+        if not self._spec_ctx:
+            return ""
+        from .spec import format_spec
+        return "\n" + format_spec(self._spec_ctx) + "\n"
+
+    def _mark_spec_issues(self, issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """结合功能画像标记「与核心功能相关」的问题（v4.7 上下文感知）：
+        命中 spec.focused 检测类型的问题加 🎯 前缀，抓 bug 时优先看这些。"""
+        if not self._spec_ctx:
+            return issues
+        focused = set(self._spec_ctx.get("focused", []))
+        if not focused:
+            return issues
+        out = []
+        for iss in issues:
+            if iss.get("type") in focused:
+                iss = dict(iss)
+                iss["desc"] = "🎯与核心功能相关 " + iss["desc"]
+            out.append(iss)
+        return out
+
+    def grade(self, spec_text: Optional[str] = None) -> str:
+        """Grader 综合评分（v4.7，--grade）：六维健康度 → 综合分 + 等级 + 改进方向。
+        支持 --spec 上下文（功能画像参与判断）与历史趋势（对比上次评分）。"""
+        from .analysis import (calculate_debt, detect_code_smells,
+                               detect_architecture_layers, detect_logic_issues,
+                               detect_performance_issues, detect_security_issues)
+        from .spec import format_grade, grade_project, load_grade, save_grade
+
+        if spec_text:
+            self.set_spec(spec_text)
+
+        tree = self.scanned["tree"]
+        root = self.root
+
+        # 六维健康度（各检测器 score 越高越差 → 健康度 = 100 - score）
+        sec = detect_security_issues(tree, root=root)
+        logic = detect_logic_issues(tree, root=root)
+        perf = detect_performance_issues(tree, root=root)
+        debt = calculate_debt(tree, self.bank, self.module_map, root=root)
+        smells = detect_code_smells(tree, root=root)
+        arch = detect_architecture_layers(tree, self.bank, self.module_map, root=root)
+
+        # 异味/结构 → 健康度（异味越少越好；分层越清晰越好）
+        smell_health = max(0.0, 100 - smells["total"] * 4.0)
+        structure_health = 85.0
+        if arch.get("has_clear_layers"):
+            structure_health = 90.0 + arch.get("layer_count", 3) * 2
+        structure_health = min(100.0, structure_health)
+
+        dims = {
+            "security": 100.0 - sec["risk_score"],
+            "logic": 100.0 - logic["logic_score"],
+            "performance": 100.0 - perf["perf_score"],
+            "structure": structure_health,
+            "quality": smell_health,
+            "debt": 100.0 - debt["total"],
+        }
+        g = grade_project(dims)
+        prev = load_grade(self.bank)
+        save_grade(self.bank, g)
+
+        lines = [self._spec_header().rstrip("\n")]
+        lines.append(format_grade(g, prev))
+        # 结合 spec 给出「功能相关」重点提醒
+        if self._spec_ctx and self._spec_ctx.get("focused"):
+            fcs = self._spec_ctx["focused"][:10]
+            lines.append("")
+            lines.append(f"🎯 与项目功能最相关的检查项: {', '.join(fcs)}")
+            lines.append("   （跑单项检测时优先看这些类型，命中即优先修）")
+        return "\n".join(lines)
+
+    def grade_diff(self) -> str:
+        """查看综合评分趋势（--grade-diff）：上次 vs 当前（需先跑过一次 --grade）。"""
+        from .spec import format_grade, grade_project, load_grade
+        from .analysis import (calculate_debt, detect_code_smells,
+                               detect_architecture_layers, detect_logic_issues,
+                               detect_performance_issues, detect_security_issues)
+        prev = load_grade(self.bank)
+        if prev is None:
+            return "📊 还没有历史评分。先跑一次 --grade 建立基准，之后 --grade-diff 就能看趋势。"
+        tree = self.scanned["tree"]
+        sec = detect_security_issues(tree, root=self.root)
+        logic = detect_logic_issues(tree, root=self.root)
+        perf = detect_performance_issues(tree, root=self.root)
+        debt = calculate_debt(tree, self.bank, self.module_map, root=self.root)
+        smells = detect_code_smells(tree, root=self.root)
+        arch = detect_architecture_layers(tree, self.bank, self.module_map, root=self.root)
+        total_lines = sum(1 for f in tree if f.endswith(".py")
+                          for _ in open(f, encoding="utf-8", errors="ignore"))
+        klines = max(total_lines / 1000.0, 0.1)
+        smell_w = 0.0
+        for s in smells["smells"]:
+            smell_w += {"high": 8.0, "medium": 3.0, "low": 1.0}.get(s["severity"], 1.0)
+        smell_health = max(0.0, min(100.0, 100 - smell_w / klines * 4.0))
+        structure_health = 90.0 + arch.get("layer_count", 3) * 2 if arch.get("has_clear_layers") else 85.0
+        structure_health = min(100.0, structure_health)
+        dims = {
+            "security": 100.0 - sec["risk_score"],
+            "logic": 100.0 - logic["logic_score"],
+            "performance": 100.0 - perf["perf_score"],
+            "structure": structure_health,
+            "quality": smell_health,
+            "debt": 100.0 - debt["total"],
+        }
+        g = grade_project(dims)
+        return format_grade(g, prev)

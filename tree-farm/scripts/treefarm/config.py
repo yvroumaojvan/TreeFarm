@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 配置与 LLM 客户端（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 配置与 LLM 客户端（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：极简 TOML 解析 / 配置文件定位（.treefarm.toml / .treefarm.json）/
 LLMClient（OpenAI 兼容接口，纯标准库 urllib，自动识别用户的 API key）。

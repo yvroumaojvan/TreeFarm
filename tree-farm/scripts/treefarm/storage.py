@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 存储层（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 存储层（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：SQLite 数据库 schema / 批量事务上下文 / GeneBank（基因库 CRUD + v2 JSON 迁移）/
 TrashBin（垃圾箱熔断器）/ Session（会话状态）/ WeedIndex（杂草索引）/ SmallTree（小树过滤）。

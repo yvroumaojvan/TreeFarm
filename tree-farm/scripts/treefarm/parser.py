@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 多语言基因/符号提取层（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 多语言基因/符号提取层（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：import 级基因提取（Python AST / 其余语言正则）、函数级调用分析
 （Python AST 精确；JS/TS、Java、Go 零依赖轻量解析器）、多语言定义提取

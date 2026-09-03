@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— v3.6（多模块版）
+"""树场机制 —— v4.7（多模块版，Grader 化）
 对应设计文档：《树场机制的核心.txt》
 
 v3.6 变更（深度分析报告 P0 第 1 项）：
@@ -106,6 +106,13 @@ MENU_TEXT = """🌳 树场 TreeFarm v""" + VERSION + """ —— 中文速查菜�
 【还有】（进阶，先记住上面这些就够了）
   调用图 / 函数级查重 / 代码异味 / 语法树分析 / 静态AST / 收敛 / 垃圾箱 / 小鸟 / 修复
   交互模式：python3 tree_farm.py 项目路径 交互    ← 进入问答式操作
+
+【v4.7 新能力：Grader 化（评估好坏 + 指导下一步）】
+  python3 tree_farm.py 项目路径 评分                ← 综合评分（安全/逻辑/性能/结构/质量/债务）
+  python3 tree_farm.py 项目路径 评分 "这是Flask博客..."  ← 带上功能描述评分，更精准
+  python3 tree_farm.py 项目路径 画像 "功能描述"      ← 告诉它项目是干嘛的
+  python3 tree_farm.py 项目路径 自读画像             ← 让它自己读 README/入口 猜功能
+  python3 tree_farm.py 项目路径 趋势                ← 跟上次评分比，看进步没有
 
 💡 记不住？随时跑：python3 tree_farm.py 菜单
 """
@@ -278,6 +285,20 @@ def _dispatch(farm: TreeFarm, root: str, args: List[str]) -> None:
         print(farm.all_checks())
     elif cmd == "--static-ast" or cmd in ("静态AST", "AST分析", "ast分析", "语法树分析"):
         print(farm.static_ast())
+    # ===== v4.7 grader 化：功能画像 / 综合评分 / 趋势 =====
+    elif cmd in ("--spec", "功能描述", "项目画像", "画像") and len(rest) >= 2:
+        farm.set_spec(rest[1])
+        print(farm.spec())
+    elif cmd in ("--spec-read", "自读画像", "AI画像", "智能画像"):
+        farm.spec_read()
+        print(farm.spec())
+        print("\n💡 已注入功能画像，之后的检测报告会结合它。用 --grade 看综合评分。")
+    elif cmd in ("--grade", "评分", "综合评分", "打分"):
+        # 支持紧跟一段功能描述：--grade "这是Flask博客..."
+        spec_text = " ".join(rest[1:]) if len(rest) >= 2 else None
+        print(farm.grade(spec_text))
+    elif cmd in ("--grade-diff", "评分对比", "趋势", "评分趋势"):
+        print(farm.grade_diff())
     # ===== 分析深度（v3.3，Mermaid 调用图 / 重复代码检测） =====
     elif cmd == "--graph" or (cmd in ("调用图", "图谱") and len(rest) >= 1):
         target = os.path.abspath(rest[1]) if len(rest) >= 2 else None
@@ -490,6 +511,10 @@ REPL_HELP = {
     "duplicates-func": "函数级查重: duplicates-func [阈值]",
     "debt": "技术债务评估",
     "smells": "代码异味检测（长函数/长参数/嵌套/魔法数字等）",
+    "spec": "项目功能画像: spec <功能描述> / spec-read 让AI自读",
+    "spec-read": "AI 自读项目功能画像",
+    "grade": "Grader 综合评分: grade [功能描述]",
+    "grade-diff": "评分趋势: 与上次对比",
     "bird": "报小鸟: bird <源> <目标>",
     "trash": "垃圾箱状态",
     "help": "帮助: help [命令]",
@@ -560,6 +585,16 @@ def _repl_dispatch(farm: TreeFarm, root: str, cmd: str, args: List[str]) -> bool
         print(farm.debt())
     elif cmd == "smells":
         print(farm.smells())
+    elif cmd == "spec" and args:
+        farm.set_spec(" ".join(args))
+        print(farm.spec())
+    elif cmd == "spec-read":
+        farm.spec_read()
+        print(farm.spec())
+    elif cmd == "grade":
+        print(farm.grade(" ".join(args) if args else None))
+    elif cmd == "grade-diff":
+        print(farm.grade_diff())
     elif cmd == "bird" and len(args) >= 2:
         print(farm.bird(_path(args[0]), args[1]))
     elif cmd == "trash":

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 公共基础层（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 公共基础层（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：配置常量 / 基因格式工具 / 文件分类与扫描 / 文件缓存 / 语义搜索 / 指纹与增量扫描。
 仅依赖 Python 标准库。其他模块从这里 import 常量与基础函数。
@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.6.0"                # 工具版本（v4.6：新增安全规则 XXE/开放重定向/认证绕过/前端XSS + 资源泄漏检测 + 路径友好提示）
+VERSION = "4.7.0"                # 工具版本（v4.7：Grader 化 —— 项目功能画像 --spec/--spec-read + 综合评分/趋势 --grade/--grade-diff + 契约检测 + 异步/测试目录降误报 + 文档同步）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

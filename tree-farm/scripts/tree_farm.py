@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa —— 入口文件故意用星号导入聚合导出全部符号（F401/F403/F405 均为设计行为）
-"""树场机制 —— v3.6（多模块版）入口
+"""树场机制 —— v4.7（多模块版）入口
 
 本文件是兼容入口：聚合导出 treefarm 包的全部公共符号 + 转发 main。
 老用法完全不变：
@@ -25,6 +25,9 @@ from treefarm.config import _parse_toml               # noqa: F401
 from treefarm.core import TreeFarm                    # noqa: F401
 from treefarm.parser import *                         # noqa: F401,F403
 from treefarm.parser import _rust_defs, _strip_rust_noise  # noqa: F401
+from treefarm.spec import *                           # noqa: F401,F403
+from treefarm.spec import (_STACK_KEYWORDS, _STACK_FOCUS, _GRADE_WEIGHTS,  # noqa: F401
+                           _dim_cn, _grade_suggestions, _head_text)
 from treefarm.storage import *                        # noqa: F401,F403
 from treefarm.cli import main, setup_logging, _dispatch  # noqa: F401
 

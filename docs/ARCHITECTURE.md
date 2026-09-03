@@ -1,7 +1,7 @@
 # 🏗️ TreeFarm 架构设计
 
 > 模块划分、依赖关系、核心算法说明、扩展指南。
-> v3.6 完成单文件 → 多模块拆分；v3.7 完成 core.py 二次拆分（调用图/查重/债务迁入 analysis）。
+> v3.6 完成单文件 → 多模块拆分；v3.7 完成 core.py 二次拆分（调用图/查重/债务迁入 analysis）；v4.7 新增 spec.py（功能画像 + Grader 综合评分/趋势），TreeFarm grader 化。
 
 ---
 

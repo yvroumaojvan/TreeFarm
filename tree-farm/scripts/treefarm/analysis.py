@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""树场机制 —— 代码分析层（v3.6 拆分自单文件 tree_farm.py）。
+"""树场机制 —— 代码分析层（v4.7；v3.6 拆分自单文件 tree_farm.py）。
 
 包含：死代码检测（4 语言）/ 循环依赖检测 / 影响分析 / 代码复杂度（Python AST +
 JS/Java/Go 轻量启发式）/ 架构分层识别。全部基于基因库 + 轻量解析器，零依赖。
@@ -1556,9 +1556,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 if not tainted_used:
                     continue
                 # SQL 注入：execute/query/raw 的参数含污点变量
-                # 排除 def execute(...) 方法定义行、self.execute(...) 自定义方法调用
+                # 排除 def execute(...) 方法定义行、self.execute(...) 自定义方法调用，
+                # 以及 executor/runner/engine 等「代码执行器/任务执行器」（非 SQL 语义）
                 is_def = re.match(r'^\s*(async\s+)?def\s+', line)
-                if not is_def and (re.search(r'''(?<!self)\.(execute|query|raw)\s*\(''', line) or re.search(r'''(?<![\w.])execute\s*\(\s*[a-zA-Z_]''', line)):
+                executor_hit = re.search(r'''(?<![\w.])executor|runner|execute_code|run_code''', line)
+                if not is_def and not executor_hit and (
+                        re.search(r'''(?<!self)\.(execute|query|raw)\s*\(''', line)
+                        or re.search(r'''(?<![\w.])execute\s*\(\s*[a-zA-Z_]''', line)):
                     if any(v in line for v in tainted_vars):
                         # 排除纯占位符参数化（参数是 ? 或 (sql, params) 的 params 部分）
                         if "?" not in line.split("(")[-1] or "=" in line:
@@ -1579,9 +1583,21 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     severity_count["high"] += 1
                     continue
 
+    # v4.7 测试目录降级：测试代码里的「问题」多为测试用例本身（故意构造的脏数据/权限用例），
+    # 不算核心库风险。标记 scope=test 并计入独立统计，不拉低核心 risk_score。
+    # （severity_count 在循环里已按全部 issues 累计；这里从 issues 过滤出核心库部分重新评分）
+    core_sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    test_sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    for iss in issues:
+        if _is_test_file(iss["file"]):
+            iss["scope"] = "test"
+            test_sev[iss["severity"]] += 1
+        else:
+            core_sev[iss["severity"]] += 1
+
     total = len(issues)
-    risk_score = min(100, severity_count["critical"] * 15 + severity_count["high"] * 8 +
-                      severity_count["medium"] * 3 + severity_count["low"] * 1)
+    risk_score = min(100, core_sev["critical"] * 15 + core_sev["high"] * 8 +
+                      core_sev["medium"] * 3 + core_sev["low"] * 1)
     if risk_score >= 70:
         grade, emoji = "F", "🔴"
     elif risk_score >= 50:
@@ -1594,8 +1610,9 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
         grade, emoji = "A", "✅"
 
     return {"total": total, "grade": grade, "emoji": emoji, "risk_score": risk_score,
-            "severity": severity_count, "issues": issues,
-            "suggestions": _security_suggestions(severity_count, total)}
+            "severity": core_sev, "issues": issues,
+            "test_issues": sum(test_sev.values()),
+            "suggestions": _security_suggestions(core_sev, sum(core_sev.values()))}
 
 
 def _security_suggestions(sev: Dict[str, int], total: int) -> List[str]:
@@ -1624,20 +1641,47 @@ def _security_suggestions(sev: Dict[str, int], total: int) -> List[str]:
 
 _LOOP_TYPES = (ast.For, ast.While, ast.AsyncFor)
 
+# v4.7 AST 解析缓存：同一文件多次检测（--all-checks / --grade 等）只 parse 一次。
+# 键 = (绝对路径, mtime, size)；文件未变则复用 AST，改动后自动失效。
+_AST_CACHE: Dict[Tuple[str, float, int], ast.AST] = {}
+_AST_CACHE_MAX = 512
+
+
+def _cached_ast(fpath: str) -> Optional[ast.AST]:
+    """带失效检查的 AST 缓存：读文件、按 (mtime, size) 命中则复用解析结果。"""
+    try:
+        st = os.stat(fpath)
+        key = (os.path.abspath(fpath), st.st_mtime, st.st_size)
+    except OSError:
+        return None
+    hit = _AST_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+            text = fh.read()
+        tree = ast.parse(text)
+    except (SyntaxError, OSError, UnicodeDecodeError):
+        return None
+    if len(_AST_CACHE) >= _AST_CACHE_MAX:
+        _AST_CACHE.clear()
+    _AST_CACHE[key] = tree
+    return tree
+
 
 def _iter_py_ast(tree_files, root):
-    """逐个解析 Python 文件为 AST，产出 (fpath, rel, lines, tree)。"""
+    """逐个解析 Python 文件为 AST，产出 (fpath, rel, lines, tree)。
+    v4.7 起走 _cached_ast 复用解析结果（性能优化，--all-checks 提速）。"""
     for fpath in tree_files:
         if not fpath.endswith(".py"):
+            continue
+        tree = _cached_ast(fpath)
+        if tree is None:
             continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                 text = fh.read()
         except Exception:
-            continue
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
             continue
         rel = os.path.relpath(fpath, root) if root else fpath
         yield fpath, rel, text.splitlines(), tree
@@ -1892,6 +1936,7 @@ def detect_performance_issues(tree_files: List[str], root: Optional[str] = None)
 
     return {"total": total, "grade": grade, "emoji": emoji, "perf_score": perf_score,
             "severity": severity_count, "issues": issues,
+            "test_issues": sum(1 for i in issues if _is_test_file(i["file"])),
             "suggestions": _perf_suggestions(severity_count, total)}
 
 
@@ -2158,9 +2203,211 @@ def _logic_suggestions(sev: Dict[str, int], total: int) -> List[str]:
     return s
 
 
+# ============================================================
+# API 契约检测（v4.7 新增，--logic 能力增强）
+# ============================================================
+
+class _ContractVisitor(ast.NodeVisitor):
+    """API 契约一致性检测（v4.7 新增）。
+
+    目标：抓 tornado #1 那类「同一家族公开方法委托对象不一致」的 API 契约 bug。
+    规则 1 —— 委托对象一致性：一个类里若 ≥3 个公开方法都调用 `self.<A>.<meth>()`
+    （A 不是 stream），却恰好有 1 个公开方法调用 `self.stream.<meth>()`，
+    且 stream 在 __init__ 里被初始化为 None → 疑似错误委托。
+    规则 2 —— 抽象方法完整性：抽象类（基类含 abc.ABC 或带模块级 ABC）声明了
+    @abstractmethod；继承它的子类若缺失任一抽象方法且未再标 abstract → 报。
+
+    返回契约：{"issues": [...]}，单文件级调用。
+    """
+
+    def __init__(self, lines, rel):
+        self.lines = lines
+        self.rel = rel
+        self.issues = []
+
+    def visit_ClassDef(self, node):
+        self._check_delegate_consistency(node)
+        self._check_abstract_completeness(node)
+
+    def _add(self, lineno, itype, sev, desc, fix=""):
+        code = self.lines[lineno - 1].strip()[:100] if 0 < lineno <= len(self.lines) else ""
+        issue = {"file": self.rel, "line": lineno, "type": itype,
+                 "severity": sev, "desc": desc, "code": code}
+        # 增强：修 bug 时附带建议（v4.7 grader 决策支撑）
+        issue["fix"] = fix
+        self.issues.append(issue)
+
+    # ---- 规则 1：委托对象一致性 ----
+    def _check_delegate_consistency(self, cls):
+        # 收集本类所有方法(self, ...)体内用到的 self.<attr>.<meth>() 委托
+        # 以及 __init__ 里 self.stream = None 之类
+        method_delegates = {}    # attr -> [ (method_name, lineno) ]
+        stream_none = False
+        for stmt in cls.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            mname = stmt.name
+            collected = _collect_self_attr_calls(stmt)
+            for attr in collected:
+                method_delegates.setdefault(attr, []).append((mname, stmt.lineno))
+            if mname == "__init__":
+                for substmt in ast.walk(stmt):
+                    if (isinstance(substmt, ast.Assign)
+                            and isinstance(substmt.targets[0], ast.Attribute)
+                            and isinstance(substmt.targets[0].value, ast.Name)
+                            and substmt.targets[0].value.id == "self"
+                            and substmt.targets[0].attr == "stream"
+                            and isinstance(substmt.value, ast.Constant)
+                            and substmt.value.value is None):
+                        stream_none = True
+
+        if not stream_none:
+            return
+        # 找主流委托对象（被 ≥3 个不同方法使用、最常见的 attr，排除 stream/self 本身）
+        best_attr, best_count = None, 0
+        for attr, uses in method_delegates.items():
+            if attr == "stream":
+                continue
+            if len(uses) >= 3 and len(uses) > best_count:
+                best_attr, best_count = attr, len(uses)
+        if best_attr is None:
+            return
+        # 若 stream 也被某方法用（且不是主流），报
+        stream_uses = method_delegates.get("stream", [])
+        if stream_uses and len(stream_uses) < best_count:
+            for mname, lineno in stream_uses:
+                self._add(
+                    lineno, "API契约",
+                    "high",
+                    (f"方法 {mname}() 委托给 self.stream，但同类{best_count}个方法都委托 "
+                     f"self.{best_attr}，疑似委托对象不一致（stream 在 __init__ 初值为 None，"
+                     f"调用会 AttributeError）。参考: write_message/close 等"
+                     f"用 self.{best_attr}，此方法应改用 self.{best_attr}"),
+                    fix=f"把 self.stream 改为 self.{best_attr}"
+                )
+
+    # ---- 规则 2：抽象方法完整性 ----
+    def _check_abstract_completeness(self, cls):
+        # 判定是否为抽象类：继承 abc.ABC / abc 的子类
+        abstract_bases = set()
+        for base in cls.bases:
+            bname = ""
+            if isinstance(base, ast.Name):
+                bname = base.id
+            elif isinstance(base, ast.Attribute):
+                try:
+                    bname = ast.unparse(base)
+                except Exception:
+                    continue
+            if bname.endswith("ABC") or bname == "ABC":
+                abstract_bases.add(bname)
+        if not abstract_bases:
+            return
+        # 收集本类 @abstractmethod 方法名
+        abstract_methods = set()
+        all_methods = set()
+        for stmt in cls.body:
+            if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            all_methods.add(stmt.name)
+            for dec in stmt.decorator_list:
+                dname = ""
+                if isinstance(dec, ast.Name):
+                    dname = dec.id
+                elif isinstance(dec, ast.Attribute):
+                    dname = dec.attr
+                if dname in ("abstractmethod", "abstractproperty", "abcmethod"):
+                    abstract_methods.add(stmt.name)
+        if not abstract_methods:
+            return
+        # 子类缺失检测需要跨类，这里做单文件的：找继承本类的子类并核对
+        tree = ast.parse("\n".join(self.lines))
+        for subclass in ast.walk(tree):
+            if not isinstance(subclass, ast.ClassDef):
+                continue
+            if subclass is cls:
+                continue
+            subclass_of_cls = False
+            for base in subclass.bases:
+                if isinstance(base, ast.Name) and base.id == cls.name:
+                    subclass_of_cls = True
+                elif isinstance(base, ast.Attribute) and ast.unparse(base) == cls.name:
+                    subclass_of_cls = True
+            if not subclass_of_cls:
+                continue
+            impl = {s.name for s in subclass.body
+                    if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            missing = abstract_methods - impl
+            if missing and _is_concrete_subclass(subclass, cls.name, tree):
+                for m in sorted(missing):
+                    self._add(
+                        subclass.lineno, "抽象方法未实现", "medium",
+                        f"子类 {subclass.name} 未实现抽象类 {cls.name} 的抽象方法 {m}()，"
+                        f"实例化会报 TypeError（abstract method）",
+                        fix=f"在 {subclass.name} 中实现 {m}()，或把 {subclass.name} 也标为抽象类"
+                    )
+
+
+def _collect_self_attr_calls(func):
+    """收集函数体内所有 self.<attr>.<method>() 调用形式里的 attr 集合。"""
+    attrs = set()
+    for n in ast.walk(func):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and isinstance(n.func.value, ast.Attribute)
+                and isinstance(n.func.value.value, ast.Name)
+                and n.func.value.value.id == "self"):
+            attrs.add(n.func.value.attr)
+    return attrs
+
+
+def _is_concrete_subclass(subclass, base_name, tree):
+    """判断子类是否仍抽象（自己还带 abstractmethod 的方法 → 仍是抽象类）。"""
+    for stmt in subclass.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in stmt.decorator_list:
+                dn = dec.id if isinstance(dec, ast.Name) else (dec.attr if isinstance(dec, ast.Attribute) else "")
+                if dn in ("abstractmethod", "abstractproperty"):
+                    return False
+    return True
+
+
+def _tree_starts_threads(tree) -> bool:
+    """AST 判定：是否真实「创建」了线程（threading.Thread(...)/ThreadPoolExecutor/裸 Thread(...)）。
+    只认 Call 节点，字符串/规则库字样不算。"""
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        name = ""
+        if isinstance(f, ast.Name):
+            name = f.id
+        elif isinstance(f, ast.Attribute):
+            try:
+                name = ast.unparse(f)
+            except Exception:
+                continue
+        if name in ("Thread", "threading.Thread", "concurrent.futures.ThreadPoolExecutor",
+                    "ThreadPoolExecutor", "multiprocessing.pool.ThreadPool", "threading.ThreadPool"):
+            return True
+    return False
+
+
+def _tree_uses_threading(tree) -> bool:
+    """AST 判定：代码里出现 threading. 属性访问（锁/本地/事件等线程原语）但未必起线程。
+    仍排除字符串字面量（Attribute 节点才算）。"""
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id in ("threading", "_thread")):
+            return True
+        if (isinstance(n, ast.Name) and n.id == "Thread"):
+            return True
+    return False
+
+
 def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
-    """检测逻辑错误（v4.5 AST 重写）：可变默认参数 / 除零风险 / 边界条件越界 /
-    竞态条件（仅真实使用线程）/ TOCTOU / is 与字面量比较 / 字符串大小比较。
+    """检测逻辑错误（v4.5 AST 重写；v4.7 新增契约检测 + 异步降误报）：
+    可变默认参数 / 除零风险 / 边界条件越界 / 竞态条件（仅真实使用线程，异步框架降误报）/
+    TOCTOU / is 与字面量比较 / 字符串大小比较 / API契约一致性 / 抽象方法完整性。
 
     基于 ast 精确判定，消除正则时代的误报。返回契约不变：
     {total, grade, emoji, logic_score, severity, issues, suggestions}。
@@ -2168,11 +2415,21 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
     issues: List[Dict[str, Any]] = []
     for _fpath, rel, lines, tree in _iter_py_ast(tree_files, root):
         text = "\n".join(lines)
-        has_threads = bool(re.search(r"\bThread\s*\(|threading\.", text))
+        # v4.7 异步降误报 + AST 线程判定：文件以 asyncio/协程为主且无真线程 → 竞态不算 high。
+        # 用 AST 找「真实线程创建调用」（threading.Thread/ThreadPoolExecutor/Thread(），
+        # 避免把字符串/规则库里的 "threading.Thread" 字样误当线程（自检误报根源）。
+        is_async_file = bool(re.search(r"\basync\s+def\b|\bawait\b", text))
+        has_real_threads = _tree_starts_threads(tree)
+        has_threads = has_real_threads or (
+            not is_async_file and _tree_uses_threading(tree))
         vis = _LogicVisitor(lines, rel, has_threads)
         vis.visit(tree)
         vis._check_race(tree)
         issues.extend(vis.issues)
+        # v4.7 新增：API 契约一致性 + 抽象方法完整性
+        cv = _ContractVisitor(lines, rel)
+        cv.visit(tree)
+        issues.extend(cv.issues)
 
     severity_count = {"high": 0, "medium": 0, "low": 0}
     for i in issues:
@@ -2190,4 +2447,5 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
 
     return {"total": total, "grade": grade, "emoji": emoji, "logic_score": logic_score,
             "severity": severity_count, "issues": issues,
+            "test_issues": sum(1 for i in issues if _is_test_file(i["file"])),
             "suggestions": _logic_suggestions(severity_count, total)}

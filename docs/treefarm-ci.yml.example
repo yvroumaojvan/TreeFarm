@@ -1,0 +1,41 @@
+# ============================================================
+# TreeFarm 官方 CI/CD 集成模板（v4.7 新增）
+# ============================================================
+# 用途：把 TreeFarm 全量检测接入 GitHub Actions / GitLab CI，
+#       每次 push / PR 自动跑 安全+性能+逻辑+债务 体检，让代码质量可追踪。
+#
+# 用法（GitHub）：
+#   1. 把本文件放到仓库 .github/workflows/treefarm-ci.yml
+#   2. push 后 Actions 会自动运行 TreeFarm --grade 并打印评分
+#   3. 可选：配置 TREEFARM_API_KEY secret 启用 LLM 自动分析
+#
+# 零依赖：TreeFarm 纯 Python 标准库，无需 pip install。
+
+name: TreeFarm 质量门禁
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  treefarm-grade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 拉取 TreeFarm（技能本体）
+        run: |
+          # 方式 A：从你仓库的 tree-farm/ 目录直接用
+          # 方式 B：下载发布包后解压
+          echo "请把 tree-farm/ 放在仓库根目录，或改成你的获取方式"
+
+      - name: 运行 Grader 综合评分
+        run: |
+          python3 tree-farm/scripts/tree_farm.py . --grade
+        env:
+          TREEFARM_API_KEY: ${{ secrets.TREEFARM_API_KEY }}  # 可选：LLM 自动分析
+
+      - name: 全量检测（单项体检）
+        run: |
+          python3 tree-farm/scripts/tree_farm.py . --all-checks
