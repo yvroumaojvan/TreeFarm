@@ -1406,7 +1406,7 @@ class TreeFarm:
                                                   code, prev_findings, r,
                                                   stale_repr)
                 try:
-                    raw = llm.chat([{"role": "user", "content": prompt}])
+                    raw = llm.chat([{"role": "user", "content": prompt}], timeout=120)
                     data = json.loads(raw)
                     if not isinstance(data, dict):
                         raise ValueError("LLM 返回不是对象")

@@ -134,26 +134,42 @@ class LLMClient:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, messages: List[Dict[str, str]]) -> str:
+    def chat(self, messages: List[Dict[str, str]], timeout: Optional[int] = None) -> str:
+        import urllib.error
         import urllib.request
         url = self.base_url.rstrip("/") + "/chat/completions"
-        body = json.dumps({
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        }).encode("utf-8")
-        req = urllib.request.Request(url, data=body, headers={
+        t = timeout or LLM_TIMEOUT
+        headers = {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + self.api_key,
-        })
+        }
+
+        def _do(payload: bytes) -> Dict[str, Any]:
+            req = urllib.request.Request(url, data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=t) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        def _body(with_format: bool) -> bytes:
+            body = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.2,
+            }
+            if with_format:
+                body["response_format"] = {"type": "json_object"}
+            return json.dumps(body).encode("utf-8")
+
         try:
-            with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:
-            raise RuntimeError(
-                f"请求失败（网络不通 或 key 无效）: {e}\n"
-                "国内网络建议换 DeepSeek/通义：在项目目录写 .treefarm.json 指定\n"
-                "（格式: {\"api_key\":\"sk-...\",\"base_url\":\"https://api.deepseek.com/v1\","
-                "\"model\":\"deepseek-chat\"}）")
+            data = _do(_body(True))
+        except Exception:
+            # 不支持 response_format 的兼容端点可能直接 4xx、也可能卡到超时（如商汤托管）
+            # → 去掉该参数重试一次，仍失败才报错
+            try:
+                data = _do(_body(False))
+            except Exception as e2:
+                raise RuntimeError(
+                    f"请求失败（网络不通 或 key 无效）: {e2}\n"
+                    "国内网络建议换 DeepSeek/通义：在项目目录写 .treefarm.json 指定\n"
+                    "（格式: {\"api_key\":\"sk-...\",\"base_url\":\"https://api.deepseek.com/v1\","
+                    "\"model\":\"deepseek-chat\"}）")
         return data["choices"][0]["message"]["content"]
