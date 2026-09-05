@@ -17,8 +17,9 @@ import shutil
 import tempfile
 import unittest
 
-from treefarm.spec import (build_spec, autodetect_spec, format_spec,
-                           grade_project, format_grade)
+from treefarm.spec import (build_spec, build_bugspec, autodetect_spec,
+                           format_spec, format_bugspec, grade_project,
+                           format_grade)
 from treefarm.analysis import detect_logic_issues, detect_security_issues
 from treefarm import analysis
 
@@ -56,6 +57,42 @@ class TestBuildSpec(unittest.TestCase):
         out = format_spec(ctx)
         self.assertIn("项目功能画像", out)
         self.assertIn("重点检测", out)
+
+
+class TestBuildBugspec(unittest.TestCase):
+    """v4.7.1：用户报 bug 症状 → 推断重点排查方向（--bug）。"""
+
+    def test_login_symptom_detected(self):
+        ctx = build_bugspec("登录功能有问题：点了登录没反应，验证还很慢，偶尔超时，金额也算错")
+        self.assertIn("登录/认证问题", ctx["symptoms"])
+        self.assertIn("功能无响应", ctx["symptoms"])
+        self.assertIn("性能卡顿", ctx["symptoms"])
+        self.assertIn("数据/逻辑错误", ctx["symptoms"])
+        self.assertTrue(ctx["is_bug"])
+        # 症状 → 重点检测类型联动
+        self.assertIn("认证绕过", ctx["focused"])
+        self.assertIn("协程未await", ctx["focused"])
+
+    def test_crash_symptom(self):
+        ctx = build_bugspec("打开就闪退崩溃，有时候白屏")
+        self.assertIn("崩溃/闪退", ctx["symptoms"])
+        self.assertIn("属性不存在", ctx["focused"])
+
+    def test_empty_bugspec(self):
+        ctx = build_bugspec("")
+        self.assertEqual(ctx["symptoms"], [])
+        self.assertEqual(ctx["focused"], [])
+        self.assertTrue(ctx["is_bug"])
+
+    def test_format_bugspec(self):
+        ctx = build_bugspec("很卡，加载不出")
+        out = format_bugspec(ctx)
+        self.assertIn("bug 画像", out)
+        self.assertIn("重点排查", out)
+
+    def test_clean_code_no_symptom(self):
+        ctx = build_bugspec("项目一切正常")
+        self.assertEqual(ctx["symptoms"], [])
 
 
 class TestAutodetectSpec(unittest.TestCase):

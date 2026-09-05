@@ -577,7 +577,7 @@ class TreeFarm:
         lines.append("=" * 56)
         lines.append("🔒 安全漏洞检测报告（v4.0）")
         lines.append("=" * 56)
-        lines.append(f"风险评分: {result['risk_score']}/100 | 等级: {result['grade']} {result['emoji']}")
+        lines.append(f"风险评分: {result['risk_score']}/100（越高越严重）| 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个安全问题"
                      f"（严重 {sev['critical']} / 高危 {sev['high']} / 中危 {sev['medium']} / 低危 {sev['low']}）")
         if result.get("test_issues"):
@@ -615,7 +615,7 @@ class TreeFarm:
         lines.append("=" * 56)
         lines.append("⚡ 性能问题检测报告（v4.0）")
         lines.append("=" * 56)
-        lines.append(f"性能评分: {result['perf_score']}/100 | 等级: {result['grade']} {result['emoji']}")
+        lines.append(f"性能风险分: {result['perf_score']}/100（越高问题越严重）| 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个性能问题"
                      f"（高 {sev['high']} / 中 {sev['medium']} / 低 {sev['low']}）")
         if result.get("test_issues"):
@@ -652,7 +652,7 @@ class TreeFarm:
         lines.append("=" * 56)
         lines.append("🐛 逻辑错误检测报告（v4.0）")
         lines.append("=" * 56)
-        lines.append(f"逻辑评分: {result['logic_score']}/100 | 等级: {result['grade']} {result['emoji']}")
+        lines.append(f"逻辑风险分: {result['logic_score']}/100（越高问题越严重）| 等级: {result['grade']} {result['emoji']}")
         lines.append(f"共发现 {result['total']} 个逻辑问题"
                      f"（高 {sev['high']} / 中 {sev['medium']} / 低 {sev['low']}）")
         if result.get("test_issues"):
@@ -944,6 +944,12 @@ class TreeFarm:
         self._spec_ctx = build_spec(description)
         return self._spec_ctx
 
+    def set_bugspec(self, description: str) -> Dict[str, Any]:
+        """注入「被检项目 bug 症状描述」（--bug "..."），推断重点排查方向。"""
+        from .spec import build_bugspec
+        self._spec_ctx = build_bugspec(description)
+        return self._spec_ctx
+
     def spec_read(self) -> Dict[str, Any]:
         """AI 自读项目功能画像（--spec-read）：读 README/docs/入口 docstring 推断。"""
         from .spec import autodetect_spec
@@ -1008,8 +1014,20 @@ class TreeFarm:
         smells = detect_code_smells(tree, root=root)
         arch = detect_architecture_layers(tree, self.bank, self.module_map, root=root)
 
-        # 异味/结构 → 健康度（异味越少越好；分层越清晰越好）
-        smell_health = max(0.0, 100 - smells["total"] * 4.0)
+        # 异味/结构 → 健康度（异味越少越好，按千行密度算避免大项目误伤；分层越清晰越好）
+        total_lines = 0
+        for f in tree:
+            if f.endswith(".py"):
+                try:
+                    with open(f, encoding="utf-8", errors="ignore") as fh:
+                        total_lines += sum(1 for _ in fh)
+                except OSError:
+                    pass
+        klines = max(total_lines / 1000.0, 0.1)
+        smell_w = 0.0
+        for s in smells["smells"]:
+            smell_w += {"high": 8.0, "medium": 3.0, "low": 1.0}.get(s["severity"], 1.0)
+        smell_health = max(0.0, min(100.0, 100 - smell_w / klines * 4.0))
         structure_health = 85.0
         if arch.get("has_clear_layers"):
             structure_health = 90.0 + arch.get("layer_count", 3) * 2

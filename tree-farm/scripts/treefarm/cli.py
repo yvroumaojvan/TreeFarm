@@ -114,6 +114,10 @@ MENU_TEXT = """🌳 树场 TreeFarm v""" + VERSION + """ —— 中文速查菜�
   python3 tree_farm.py 项目路径 自读画像             ← 让它自己读 README/入口 猜功能
   python3 tree_farm.py 项目路径 趋势                ← 跟上次评分比，看进步没有
 
+【v4.7.1 新能力：报 bug 症状，精准排查】
+  python3 tree_farm.py 项目路径 报bug "登录没反应、金额算错、很卡"
+                                     ← 描述你遇到的 bug 症状，它按症状重点排查
+
 💡 记不住？随时跑：python3 tree_farm.py 菜单
 """
 from .parser import extract_symbols
@@ -289,6 +293,10 @@ def _dispatch(farm: TreeFarm, root: str, args: List[str]) -> None:
     elif cmd in ("--spec", "功能描述", "项目画像", "画像") and len(rest) >= 2:
         farm.set_spec(rest[1])
         print(farm.spec())
+    elif cmd in ("--bug", "bug描述", "症状", "问题描述", "报bug") and len(rest) >= 2:
+        farm.set_bugspec(rest[1])
+        print(farm.spec())
+        print("\n💡 已注入 bug 症状画像，检测报告会优先排查你报的症状方向。用 --grade 看综合评分。")
     elif cmd in ("--spec-read", "自读画像", "AI画像", "智能画像"):
         farm.spec_read()
         print(farm.spec())
@@ -513,6 +521,7 @@ REPL_HELP = {
     "smells": "代码异味检测（长函数/长参数/嵌套/魔法数字等）",
     "spec": "项目功能画像: spec <功能描述> / spec-read 让AI自读",
     "spec-read": "AI 自读项目功能画像",
+    "bug": "报 bug 症状: bug <症状描述>，按症状重点排查",
     "grade": "Grader 综合评分: grade [功能描述]",
     "grade-diff": "评分趋势: 与上次对比",
     "bird": "报小鸟: bird <源> <目标>",
@@ -590,6 +599,9 @@ def _repl_dispatch(farm: TreeFarm, root: str, cmd: str, args: List[str]) -> bool
         print(farm.spec())
     elif cmd == "spec-read":
         farm.spec_read()
+        print(farm.spec())
+    elif cmd == "bug" and args:
+        farm.set_bugspec(" ".join(args))
         print(farm.spec())
     elif cmd == "grade":
         print(farm.grade(" ".join(args) if args else None))
