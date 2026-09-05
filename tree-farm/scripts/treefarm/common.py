@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.7.1"                # 工具版本（v4.7：Grader 化；v4.7.1：bug 症状画像 --bug + grade/grade_diff 质量算法统一 + 风险分命名修正 + 文档同步）
+VERSION = "4.8.0"                # 工具版本（v4.8：全自动深度体检 --deep 大树→思维链→跨树串联 + get后del/submit直返规则 + 症状词表补异步）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

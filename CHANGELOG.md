@@ -5,6 +5,31 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.8.0] - 2026-09-05
+
+### ✨ 新功能：全自动深度体检（--deep / 深度体检 / 大树体检 / 全自动流水线）
+
+按「树场机制」原生设计实现的**一键全自动流水线**——参天大树 → 思维链分支 → 跨树串联：
+
+- **参天大树识别**：基因库统计每棵树的「被引用度 + 基因数」，自动识别核心大树（被引用多 = 枢纽/根节点）；资源/非核心文件自动归为杂草（需要时才读，省 token）
+- **每棵大树长出一条思维链分支**：该树的基因上下文（引用谁/被谁引用）+ 静态检测聚焦该树的问题（安全/性能/逻辑，按严重度排序）——边检测边思考，符合大树与思维链强关联设计
+- **跨树串联**：核心树之间的引用搭桥（🔗 改前者需排查后者）+ 跨树共性问题（🐦 同一问题类型在多棵树出现 → 系统级缺陷嫌疑）自动报小鸟
+- **决策支撑**：汇总问题统计 + 「优先修哪棵提分最快」建议；对无静态命中的树提示 --analyze 让 LLM 深挖
+
+### 🔧 逻辑检测新增 2 条 AST 规则（对 tornado#3/#7 型真实 bug 验证命中）
+
+- **get 后 del 同一字典 key**（tornado#3 复现）：`cache.get(k)` 后 `del cache[k]`，key 缺失时 get 返回 None 但 del 抛 KeyError → 建议 `pop(key, None)`；支持 `self.cache` 属性写法，同 key 精确匹配防误报
+- **executor.submit() 直返**（tornado#7 复现）：`return executor.submit(...)` 返回 concurrent.futures.Future，异步 `await` 报 TypeError → 建议 `asyncio.wrap_future` / tornado Future 包装；已包装的不误报
+
+### 🔧 其他
+
+- **bug 症状词表补「异步/协程问题」**：await/async/异步/协程/Future/不兼容/asyncio/事件循环 → 症状画像正确识别异步类 bug 症状
+- **评测基准**：BugsInPy tornado Bug#1~7 七个真实难 bug 功能全开实测——静态规则直接命中从 **1/7（14%）提升到 4/7（57%）**，配合思维树 7/7（100%）
+
+### 🧪 测试
+
+- 新增 v4.8 测试套件（test_v48_deepscan.py 8 项：deep_scan 大树识别/思维链/串联/汇总 + 新规则命中/防误报），**313 个 unittest 全绿**
+
 ## [4.7.1] - 2026-09-05
 
 ### ✨ 新功能：报 bug 症状画像（--bug）

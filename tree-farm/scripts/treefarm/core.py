@@ -992,6 +992,144 @@ class TreeFarm:
             out.append(iss)
         return out
 
+    # ===== v4.8 全自动流水线：参天大树 → 思维链分支 → 跨树串联 =====
+
+    def deep_scan(self) -> str:
+        """一键全自动深度体检（--deep / 深度体检 / 大树体检 / 全自动流水线）。
+
+        严格按树场机制设计（大树+思维链强关联，边检测边思考）：
+          1. 参天大树：基因库统计每棵树的「被引用度 + 基因数」，识别核心大树
+             （被引用多 = 枢纽/根节点；杂草 = 资源/非核心，需要时才读，省 token）
+          2. 每棵大树长出一条思维链分支：该树的基因上下文（引用谁/被谁引用）
+             + 静态检测聚焦该树的问题（安全/性能/逻辑），按严重度排序
+          3. 跨树串联：核心树之间的引用搭桥（改动前者需排查后者）
+             + 跨树共性问题（同一问题类型在多棵树出现 → 系统级缺陷嫌疑）报小鸟
+          4. 汇总：问题统计 + 「优先修哪棵提分最快」建议
+        零依赖可跑；配了 LLM key 后可再对重点树 --analyze 深挖。"""
+        from .analysis import (detect_logic_issues, detect_performance_issues,
+                               detect_security_issues)
+        tree = self.scanned["tree"]
+        if not tree:
+            return "🌳 没有代码文件，无法体检。"
+        root = self.root
+        lines = ["=" * 56,
+                 "🌳 全自动深度体检（大树 → 思维链 → 跨树串联）",
+                 "=" * 56]
+
+        # ===== 1. 参天大树：按「被引用度 + 基因数」识别核心树 =====
+        refs_of: Dict[str, List[str]] = {}
+        genes_of: Dict[str, int] = {}
+        for f in tree:
+            refs = self.bank.sources_referencing(f)
+            refs_of[f] = [r for r in refs]
+            genes_of[f] = len(self.bank.genes_of_source(f))
+        ranked = sorted(tree, key=lambda f: (-len(refs_of[f]), -genes_of[f]))
+        has_ref = [f for f in ranked if refs_of[f]]
+        core = has_ref if has_ref else ranked[:max(1, len(ranked) // 2)]
+        weeds = [f for f in ranked if f not in core]
+        hub_line = max(1, len(core) // 2) if core else 1
+
+        # ===== 2. 静态检测全扫一次，按文件分组 =====
+        sec = detect_security_issues(tree, root=root)
+        perf = detect_performance_issues(tree, root=root)
+        logic = detect_logic_issues(tree, root=root)
+        all_issues = sec["issues"] + perf["issues"] + logic["issues"]
+        by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for iss in all_issues:
+            p = iss["file"]
+            if not os.path.isabs(p):
+                p = os.path.join(root, p)
+            by_file.setdefault(os.path.normpath(p), []).append(iss)
+
+        # 跨树共性：同一问题类型出现在 ≥2 棵不同树
+        type_files: Dict[str, Set[str]] = {}
+        for p, iss_list in by_file.items():
+            for iss in iss_list:
+                type_files.setdefault(iss["type"], set()).add(p)
+        cross = {t: sorted(fs) for t, fs in type_files.items() if len(fs) >= 2}
+
+        # ===== 3. 每棵大树 → 一条思维链分支 =====
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        for i, f in enumerate(core, 1):
+            rel = os.path.relpath(f, root)
+            n_ref = len(refs_of[f])
+            n_gene = genes_of[f]
+            iss_list = sorted(by_file.get(f, []),
+                              key=lambda x: sev_order.get(x["severity"], 9))
+            hub = "  ← 枢纽/根节点" if n_ref >= hub_line else ""
+            lines.append("")
+            lines.append(f"├─ 🌳 大树 {i}/{len(core)}: {rel}")
+            lines.append(f"│    核心度: 被引用 {n_ref} 次 | 基因 {n_gene} 条{hub}")
+            fwd = []
+            for g in self.bank.genes_of_source(f):
+                t = g["target"]
+                if os.path.isfile(t):
+                    fwd.append(os.path.relpath(t, root))
+                else:
+                    fwd.append(t)  # 模块名/符号名直接显示
+            if fwd:
+                shown = ", ".join(fwd[:6])
+                lines.append(f"│    引用: {shown}{' ...' if len(fwd) > 6 else ''}")
+            bwd = [os.path.relpath(r, root) for r in refs_of[f][:6]]
+            if bwd:
+                lines.append(f"│    被引用: {', '.join(bwd)}")
+            if iss_list:
+                lv_cn = {"critical": "🔴严重", "high": "🟠高危",
+                         "medium": "🟡中", "low": "🟢低"}
+                for iss in iss_list[:8]:
+                    lv = lv_cn.get(iss["severity"], "?")
+                    lines.append(f"│    🧬[{lv}][{iss['type']}] 行{iss['line']}: "
+                                 f"{iss['desc'][:58]}")
+                if len(iss_list) > 8:
+                    lines.append(f"│    ... 还有 {len(iss_list) - 8} 个")
+            else:
+                lines.append("│    🧬 该树静态检测未发现明显问题"
+                             "（可 --analyze 让 LLM 深挖）")
+        if weeds:
+            lines.append("")
+            lines.append(f"├─ 🌿 杂草 {len(weeds)} 棵（资源/非核心，需要时再读，省 token）:")
+            shown = ", ".join(os.path.relpath(w, root) for w in weeds[:8])
+            lines.append("│    " + shown + (" ..." if len(weeds) > 8 else ""))
+
+        # ===== 4. 跨树串联：搭桥 + 共性问题 =====
+        lines.append("")
+        lines.append("── 跨树串联（大树之间的逻辑关联）──")
+        bridges = 0
+        for f in core[:12]:
+            rel = os.path.relpath(f, root)
+            fwd_core = [os.path.relpath(g["target"], root)
+                        for g in self.bank.genes_of_source(f)
+                        if g["target"] in core and g["target"] != f]
+            for t in fwd_core[:4]:
+                lines.append(f"  🔗 {rel} ⇢ {t}（改前者需排查后者）")
+                bridges += 1
+        if not bridges:
+            lines.append("  （核心树之间无直接引用，耦合度低，结构健康）")
+        if cross:
+            lines.append("")
+            lines.append("  🐦 跨树共性问题（同类型在多棵树出现，可能是系统级缺陷）:")
+            for t, fs in list(cross.items())[:6]:
+                names = ", ".join(os.path.relpath(p, root) for p in fs[:4])
+                lines.append(f"    • {t}（{len(fs)} 棵: {names}）")
+
+        # ===== 5. 汇总 =====
+        lines.append("")
+        lines.append(f"── 汇总: 核心大树 {len(core)} | 杂草 {len(weeds)} | "
+                     f"问题 {len(all_issues)}（安全 {sec['total']} / "
+                     f"性能 {perf['total']} / 逻辑 {logic['total']}）")
+        worst = None
+        for f in core:
+            n = len(by_file.get(f, []))
+            if n and (worst is None or n > worst[1]):
+                worst = (os.path.relpath(f, root), n)
+        if worst:
+            lines.append(f"💡 优先修: {worst[0]}（问题最多 {worst[1]} 个，"
+                         f"提分最快）")
+        lines.append("")
+        lines.append("💡 下一步: 对重点树跑 --genes <文件> 看细节，"
+                     "或 --grade 看综合评分/趋势")
+        return "\n".join(lines)
+
     def grade(self, spec_text: Optional[str] = None) -> str:
         """Grader 综合评分（v4.7，--grade）：六维健康度 → 综合分 + 等级 + 改进方向。
         支持 --spec 上下文（功能画像参与判断）与历史趋势（对比上次评分）。"""

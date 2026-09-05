@@ -77,12 +77,12 @@ TreeOfThought+TreeFarm(融合版)/
 │       ├── tree-search.js      #   ★ 树搜索管理器（零依赖 Node，v3 新增）
 │       ├── render-tree.js      #   推理 JSON / 搜索状态 → 文字符号树（含状态徽章）
 │       └── test_tree_search.js #   树搜索 14 个测试（node test_tree_search.js）
-├── tree-farm/                  # ★ 技能 2：树场 v4.7.1（Agent Skills 标准格式）
-│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.7.1 同步）
+├── tree-farm/                  # ★ 技能 2：树场 v4.8.0（Agent Skills 标准格式）
+│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.8.0 同步）
 │   └── scripts/
-│       ├── tree_farm.py        #   树场引擎 v4.7.1 入口（纯 Python 标准库，SQLite 存储）
+│       ├── tree_farm.py        #   树场引擎 v4.8.0 入口（纯 Python 标准库，SQLite 存储）
 │       ├── treefarm/           #   ★ 多模块包（common/parser/storage/config/analysis/core/cli/sandbox/spec）
-│       ├── tests/              #   305 个 unittest 测试（python3 -m unittest discover -s tests）
+│       ├── tests/              #   313 个 unittest 测试（python3 -m unittest discover -s tests）
 │       └── apk_analyze.sh      #   APK 一条龙脚本（反编译 → 树场）
 └── examples/
     ├── 完整输出示例.md          # 思维树文字树效果（完整/紧凑/ASCII）
@@ -145,7 +145,7 @@ python3 tree-farm/scripts/tree_farm.py examples/demo_project
 # 树场：AI 工作简报（省 token 核心）
 python3 tree-farm/scripts/tree_farm.py examples/demo_project --brief
 
-# 跑全部测试（Python 239 个 + Node 14 个）
+# 跑全部测试（Python 313 个 + Node 14 个）
 python3 -m unittest discover -s tree-farm/scripts/tests
 node tree-of-thought/scripts/test_tree_search.js
 
@@ -166,7 +166,7 @@ python3 tree-farm/scripts/tree_farm.py examples/demo_project --architecture
 | 原版包 | 本融合版（v3.2 已升级） |
 |-------|---------|
 | 思维树独立包 | `tree-of-thought/` 技能并入，**升级为真搜索算法版**（六步流程 → 搜索循环 + 评分/剪枝/回溯 + tree-search.js） |
-| 树场独立包 | `tree-farm/` 技能并入，**升级为 v4.7.1**（函数级分析 + 真增量更新 + SQLite 存储 + 5 大代码分析 + 沙箱动态测试 + 静态AST + 中文命令菜单 + AST 精确性能/逻辑检测 + 安全规则补齐 XXE/开放重定向/认证绕过/前端XSS + 资源泄漏 + **Grader 化：功能画像 --spec/--spec-read + 报bug症状 --bug + 综合评分/趋势 --grade/--grade-diff + 契约检测 + 305 个测试**） |
+| 树场独立包 | `tree-farm/` 技能并入，**升级为 v4.8.0**（函数级分析 + 真增量更新 + SQLite 存储 + 5 大代码分析 + 沙箱动态测试 + 静态AST + 中文命令菜单 + AST 精确性能/逻辑检测 + 安全规则补齐 XXE/开放重定向/认证绕过/前端XSS + 资源泄漏 + **Grader 化：功能画像 --spec/--spec-read + 报bug症状 --bug + 综合评分/趋势 --grade/--grade-diff + 契约检测 + 全自动深度体检 --deep + 313 个测试**） |
 | 各自独立的 install.sh | 合并为一个，一次装两个 |
 | 各自独立的 README/教程/粘贴用 | 合并为融合版全套文档 |
 | （原版 bug）install.sh 不复制 scripts/ | 已修复：脚本收进技能目录内，复制即完整 |
@@ -223,7 +223,7 @@ A：**大项目 + 多轮排查**（实测 21MB APK 省 97.9% token）。小项�
 | 一句话自定义 | 「思维树 3 分支 1 轮」「思维树束宽 6」「思维树 dfs」「恢复默认」 |
 | 纯聊天降级 | 无终端环境自动降级为「手动模拟搜索」（评分/剪枝/回溯照做，手记状态） |
 
-### 🌳 树场 TreeFarm v4.7.0（管「读哪些、怎么省」）
+### 🌳 树场 TreeFarm v4.8.0（管「读哪些、怎么省」）
 
 | 功能 | 说明 |
 |------|------|
@@ -259,15 +259,16 @@ A：**大项目 + 多轮排查**（实测 21MB APK 省 97.9% token）。小项�
 | 语义搜索 | `--search` 符号精确 + 标识符归一化（UserAuth→user_auth）+ 预构建内容索引，跨语言 |
 | 多语言支持 | Python(AST 精确) + JS/TS(函数级 v3.3) + Java(函数级 v3.4) + Go(函数级 v3.5) + **Rust(函数级 v3.7)** + C/C++（import 级正则） |
 | APK 一条龙 | `apk_analyze.sh` 反编译 → 树场体检 → 简报，全程零配置 |
-| 工程化 | **305 个 unittest 测试全绿**（+ 14 个 Node 树搜索测试）、GitHub Actions CI、--debug 日志、--brief --compact 精简输出 |
+| 工程化 | **313 个 unittest 测试全绿**（+ 14 个 Node 树搜索测试）、GitHub Actions CI、--debug 日志、--brief --compact 精简输出 |
 | 纯提示词版 | 无终端的聊天 AI 也能用（粘贴即生效） |
 
 ### 🏆 Grader 化（v4.7 新增：从「扫 bug」到「评估好坏 + 指导下一步」）
 
 | 功能 | 说明 |
 |------|------|
+| **🌳 全自动深度体检** | `--deep` / `深度体检`：一键流水线——识别核心大树（被引用度）→ 每棵大树长思维链（基因+静态检测）→ 跨树搭桥/共性小鸟 → 优先修复建议（v4.8） |
 | **🎯 功能画像** | `--spec "功能描述"` 让被检者输入项目功能（如"Flask 博客：注册登录/发文章/评论"），自动解析技术栈与重点检测类型 |
-| **🐛 报 bug 症状** | `--bug "症状描述"` 让被检者描述遇到的 bug（如"登录没反应、金额算错、很卡"），按症状推断重点排查方向（v4.7.1） |
+| **🐛 报 bug 症状** | `--bug "症状描述"` 让被检者描述遇到的 bug（如"登录没反应、金额算错、很卡"），按症状推断重点排查方向（v4.8.0） |
 | **📖 AI 自读画像** | `--spec-read`：自己读 README/docs/入口 docstring 推断功能，零依赖无需 LLM key |
 | **🏆 综合评分** | `--grade`：六维健康度（安全/逻辑/性能/结构/质量/债务）加权出综合分 0~100 + 等级 A+~F + 短板优先改进方向 |
 | **📈 评分趋势** | `--grade-diff`：与上次评分对比各维度变化，进步/退步可量化追踪（评分存基因库） |

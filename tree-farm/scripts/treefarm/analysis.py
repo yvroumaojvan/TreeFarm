@@ -2053,6 +2053,55 @@ class _LogicVisitor(ast.NodeVisitor):
                 return None
         return None
 
+    # ---- v4.8：get 后 del 同一字典 key（tornado#3 型 bug：缓存 key 缺失抛 KeyError） ----
+    def visit_Delete(self, node):
+        for t in node.targets:
+            if not isinstance(t, ast.Subscript):
+                continue
+            val = t.value
+            if isinstance(val, ast.Name):
+                dict_var = val.id
+            elif isinstance(val, ast.Attribute):
+                try:
+                    dict_var = ast.unparse(val)
+                except Exception:
+                    continue
+            else:
+                continue
+            fn = self._enclosing_func(node)
+            scope = fn if fn is not None else node
+            key_dump = ast.dump(t.slice) if t.slice is not None else None
+            for n in ast.walk(scope):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "get" and n.args):
+                    try:
+                        got_var = ast.unparse(n.func.value)
+                    except Exception:
+                        continue
+                    if got_var != dict_var:
+                        continue
+                    got_dump = ast.dump(n.args[0]) if n.args[0] else None
+                    if key_dump is None or got_dump == key_dump:
+                        self._add(t.lineno, "字典键不存在访问", "medium",
+                                  f"先 {dict_var}.get(...) 后 del {dict_var}[...] 同一 key："
+                                  f"key 缺失时 get 返回 None 但 del 直接抛 KeyError，"
+                                  f"建议 {dict_var}.pop(key, None)")
+                        break
+        self.generic_visit(node)
+
+    # ---- v4.8：executor.submit() 返回值直接返回（tornado#7 型 bug：concurrent Future 不可 await） ----
+    def visit_Return(self, node):
+        val = node.value
+        if (isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute)
+                and val.func.attr == "submit" and isinstance(val.func.value, ast.Name)
+                and ("executor" in val.func.value.id.lower()
+                     or "pool" in val.func.value.id.lower())):
+            self._add(node.lineno, "协程未await", "medium",
+                      f"{val.func.value.id}.submit() 返回 concurrent.futures.Future 被直接返回，"
+                      f"异步调用方 await 会报 TypeError（无 __await__），"
+                      f"建议用 asyncio.wrap_future / 包装成 tornado Future")
+        self.generic_visit(node)
+
     # ---- 竞态条件：仅当文件真实使用线程 + 共享属性自增无锁 ----
     def _has_lock_in_scope(self, node):
         scope = self._enclosing_func(node)

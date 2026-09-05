@@ -118,6 +118,11 @@ MENU_TEXT = """🌳 树场 TreeFarm v""" + VERSION + """ —— 中文速查菜�
   python3 tree_farm.py 项目路径 报bug "登录没反应、金额算错、很卡"
                                      ← 描述你遇到的 bug 症状，它按症状重点排查
 
+【v4.8 新能力：全自动深度体检（大树 → 思维链 → 跨树串联）】
+  python3 tree_farm.py 项目路径 深度体检          ← 一键：识别核心大树
+                                     ← 每棵大树长出一条思维链（基因+静态检测）
+                                     ← 大树之间搭桥/报共性小鸟，给优先修复建议
+
 💡 记不住？随时跑：python3 tree_farm.py 菜单
 """
 from .parser import extract_symbols
@@ -290,6 +295,8 @@ def _dispatch(farm: TreeFarm, root: str, args: List[str]) -> None:
     elif cmd == "--static-ast" or cmd in ("静态AST", "AST分析", "ast分析", "语法树分析"):
         print(farm.static_ast())
     # ===== v4.7 grader 化：功能画像 / 综合评分 / 趋势 =====
+    elif cmd in ("--deep", "深度体检", "大树体检", "全自动流水线", "参天大树", "大树"):
+        print(farm.deep_scan())
     elif cmd in ("--spec", "功能描述", "项目画像", "画像") and len(rest) >= 2:
         farm.set_spec(rest[1])
         print(farm.spec())
@@ -519,6 +526,7 @@ REPL_HELP = {
     "duplicates-func": "函数级查重: duplicates-func [阈值]",
     "debt": "技术债务评估",
     "smells": "代码异味检测（长函数/长参数/嵌套/魔法数字等）",
+    "deep": "全自动深度体检: 大树识别 + 每树思维链 + 跨树串联",
     "spec": "项目功能画像: spec <功能描述> / spec-read 让AI自读",
     "spec-read": "AI 自读项目功能画像",
     "bug": "报 bug 症状: bug <症状描述>，按症状重点排查",
@@ -547,6 +555,8 @@ def _repl_dispatch(farm: TreeFarm, root: str, cmd: str, args: List[str]) -> bool
         return True
     if cmd == "brief":
         print(farm.brief(compact="--compact" in args))
+    elif cmd in ("deep", "deep-scan", "深度体检", "大树体检", "流水线"):
+        print(farm.deep_scan())
     elif cmd == "search" and args:
         hits = semantic_search(args[0], farm.scanned["tree"],
                                farm.symbol_index, farm.content_index)
