@@ -1290,6 +1290,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
     issues = []
     severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
+    # v4.9.5：跨文件污点元数据（第一阶段收集，第二阶段注入补扫）
+    file_lines_cache: Dict[str, List[str]] = {}
+    file_imports: Dict[str, Dict[str, str]] = {}
+    file_from_imports: Dict[str, Dict[str, tuple]] = {}
+    file_func_params: Dict[str, Dict[str, List[str]]] = {}
+    cross_calls: List[Dict[str, object]] = []
+
     for fpath in tree_files:
         ext = os.path.splitext(fpath)[1].lower()
         if ext not in _SECURITY_EXTS:
@@ -1324,14 +1331,42 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                         or _src_rank[src] > _src_rank.get(tainted_vars[var], 0)):
                 tainted_vars[var] = src
 
-        # 函数参数 → param 弱污点（外部调用者可能传用户值，但需拼接/传播才升级为可报）
+        # v4.9.5：import 模块映射 + from 导入函数映射（跨文件污点第一阶段收集，单次遍历）
+        imports = {}
+        from_imports = {}
         for ln in lines:
-            fm = re.search(r'''^\s*def\s+\w+\s*\(([^)]*)\)''', ln)
+            m_imp = re.match(r'^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?', ln)
+            if m_imp:
+                imports[m_imp.group(2) or m_imp.group(1).split(".")[0]] = m_imp.group(1)
+                continue
+            m_fi = re.match(r'^\s*from\s+([\w.]+)\s+import\s+([^#(]+)$', ln)
+            if m_fi:
+                mod = m_fi.group(1)
+                for item in m_fi.group(2).split(","):
+                    item = item.strip()
+                    if not item or item == "*":
+                        continue
+                    if " as " in item:
+                        orig, alias = [x.strip() for x in item.split(" as ", 1)]
+                        from_imports[alias] = (mod, orig)
+                    else:
+                        from_imports[item] = (mod, item)
+        file_imports[rel] = imports
+        file_from_imports[rel] = from_imports
+        file_lines_cache[rel] = lines
+
+        # 函数参数 → param 弱污点（外部调用者可能传用户值，但需拼接/传播才升级为可报）
+        # v4.9.5：同时记录 函数名→参数表（跨文件污点第二阶段按位置/名字注入）
+        func_params = {}
+        for ln in lines:
+            fm = re.search(r'''^\s*def\s+(\w+)\s*\(([^)]*)\)''', ln)
             if fm:
-                for param in fm.group(1).split(","):
-                    param = param.strip().split("=")[0].strip().lstrip("*")
+                func_params[fm.group(1)] = [p.strip().split("=")[0].strip().lstrip("*")
+                                            for p in fm.group(2).split(",") if p.strip()]
+                for param in func_params[fm.group(1)]:
                     if param and param != "self" and param != "cls":
                         _mark_taint(param, "param")
+        file_func_params[rel] = func_params
         for ln in lines:
             if len(ln) > 4096:
                 ln = ln[:4096]  # v4.9.2：污点收集只看行首，超长行截断防 ReDoS
@@ -1366,6 +1401,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     if hits:
                         # 拼接传播：操作数含 user 则升级 user，否则 concat（拼接本身即注入形态）
                         _mark_taint(lhs, "user" if any(tainted_vars[v] == "user" for v in hits) else "concat")
+
+        # v4.9.5：跨文件污点调用收集（强污点实参传入模块函数 → 第二阶段注入被调函数参数）
+        if imports or from_imports:
+            cross_calls.extend(_collect_cross_calls(lines, imports, tainted_vars, rel,
+                                                    from_imports))
 
         for i, line in enumerate(lines, 1):
             # v4.9.2 行长护栏：超长行截断到 32KB（防正则灾难性回溯，检测能力不受影响）
@@ -1860,6 +1900,22 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     severity_count["medium"] += 1
                     continue
 
+    # v4.9.5：第二阶段——跨文件污点注入补扫（单层：a.py 强污点实参 → b.py 函数参数流入危险 sink）
+    if cross_calls:
+        _cross_file_taint_pass(cross_calls, file_imports, file_from_imports,
+                               file_func_params, file_lines_cache, tree_files, root,
+                               issues, severity_count)
+
+    # v4.9.5 第3轮：单文件层与跨文件层同一 sink 行去重——跨文件条目证据链更完整（带来源追溯）优先，
+    # 避免「param 拼接升级 concat」的单文件层误报与跨文件层命中重复刷屏同一行。
+    if issues:
+        seen: Dict[tuple, Dict[str, object]] = {}
+        for iss in issues:
+            key = (iss["file"], iss["line"], iss["type"])
+            if key not in seen or "跨文件" in iss["desc"]:
+                seen[key] = iss
+        issues = list(seen.values())
+
     # v4.7 测试目录降级：测试代码里的「问题」多为测试用例本身（故意构造的脏数据/权限用例），
     # 不算核心库风险。标记 scope=test 并计入独立统计，不拉低核心 risk_score。
     # （severity_count 在循环里已按全部 issues 累计；这里从 issues 过滤出核心库部分重新评分）
@@ -1890,6 +1946,254 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             "severity": core_sev, "issues": issues,
             "test_issues": sum(test_sev.values()),
             "suggestions": _security_suggestions(core_sev, sum(core_sev.values()))}
+
+
+def _split_call_args(argstr: str) -> List[str]:
+    """按逗号切分函数调用实参（跨文件污点用；不支持嵌套括号场景，宁漏不误）。"""
+    return [a.strip() for a in argstr.split(",") if a.strip()]
+
+
+def _taint_var_pattern(v: str) -> str:
+    """污点变量名匹配：短名（<3 字符）用严格边界防子串误报（q 不匹配 query），
+    长名用词边界。统一不允许前面是字母数字/点（self.x 属性访问不算局部变量）。"""
+    if len(v) >= 3:
+        return r'\b' + re.escape(v) + r'\b'
+    return r'(?<![\w.])' + re.escape(v) + r'(?!\w)'
+
+
+def _match_tainted_args(argstr: str, tainted_vars: Dict[str, str]):
+    """在调用实参串里找第一个命中强污点（user/concat）或内联用户源的实参。
+    返回 (arg_pos, arg_name, expr)；无命中返回 None。先用 C 级子串预筛再正则，压热路径。"""
+    for ai, raw_arg in enumerate(_split_call_args(argstr)):
+        arg_name, expr = None, raw_arg
+        eq = raw_arg.find("=")
+        if eq > 0 and re.match(r'^\w+$', raw_arg[:eq].strip()):
+            arg_name, expr = raw_arg[:eq].strip(), raw_arg[eq + 1:].strip()
+        if expr:
+            candidates = [v for v in tainted_vars if v in expr]  # 子串预筛，跳过无变量行
+            strong_hits = [v for v in candidates
+                           if tainted_vars[v] in ("user", "concat")
+                           and re.search(_taint_var_pattern(v), expr)]
+        else:
+            strong_hits = []
+        inline_src = (("request" in expr or "input" in expr or "argv" in expr)
+                      and bool(re.search(r'(request\.|input\s*\(|sys\.argv)', expr)))
+        if strong_hits or inline_src:
+            return ai, arg_name, expr
+    return None
+
+
+def _collect_cross_calls(lines: List[str], imports: Dict[str, str],
+                         tainted_vars: Dict[str, str], rel: str,
+                         from_imports: Optional[Dict[str, tuple]] = None) -> List[Dict[str, object]]:
+    """v4.9.5：收集「强污点实参传入模块函数」的调用记录（跨文件第一阶段 / 透传层共用）。
+    支持三种形态：模块别名调用（bb.f(x)）、包路径（pkg.mod.f(x)）、from 导入函数（f(x)）。
+    性能：正则预编译一次，无点行短路（模块调用必有 .）。"""
+    pre = []
+    for alias, mod in imports.items():
+        rest = mod[len(alias):] if mod.startswith(alias) else ""
+        pre.append((re.compile(r'\b' + re.escape(alias) + re.escape(rest)
+                               + r'\.(\w+)\s*\(([^)]*)\)'), alias + rest, mod))
+    pre_from = [(re.compile(r'(?<![\w.])' + re.escape(f) + r'\s*\(([^)]*)\)'), mod, orig)
+                for f, (mod, orig) in (from_imports or {}).items()]
+    if not pre and not pre_from:
+        return []
+    calls = []
+    for i, line in enumerate(lines, 1):
+        if len(line) > 4096:
+            line = line[:4096]
+        if "(" not in line:
+            continue  # 函数调用必有括号，无括号行快速跳过
+        if "." not in line and not pre_from:
+            continue  # 模块调用必有「.」，无点行快速跳过（from 形态无点，不可跳过）
+        # 形态一：模块别名调用 bb.f(...) / 包路径 pkg.mod.f(...)（第4轮支持多级模块）
+        for call_re, alias_str, mod in pre:
+            if len(alias_str) >= 3 and alias_str not in line:
+                continue  # 长别名 C 级子串预筛（短名如 os/sys 几乎每行都命中，直接正则）
+            m_cc = call_re.search(line)
+            if not m_cc:
+                continue
+            hit = _match_tainted_args(m_cc.group(2), tainted_vars)
+            if hit:
+                ai, arg_name, expr = hit
+                calls.append({"module": mod, "func": m_cc.group(1), "arg_pos": ai,
+                              "arg_name": arg_name, "caller_rel": rel, "caller_line": i,
+                              "src_desc": f"{rel}:{i} 的 {expr}"})
+                break
+        # 形态二：from 导入函数调用 f(...)（无模块前缀，第4轮支持）
+        for call_re, mod, orig in pre_from:
+            m_cc = call_re.search(line)
+            if not m_cc:
+                continue
+            hit = _match_tainted_args(m_cc.group(1), tainted_vars)
+            if hit:
+                ai, arg_name, expr = hit
+                calls.append({"module": mod, "func": orig, "arg_pos": ai,
+                              "arg_name": arg_name, "caller_rel": rel, "caller_line": i,
+                              "src_desc": f"{rel}:{i} 的 {expr}"})
+                break
+    return calls
+
+
+def _expand_taint_in_file(lines: List[str], params: List[str]) -> Set[str]:
+    """v4.9.5：注入参数在目标文件内的轻量传播（迭代到不动点，上限 10 轮）：
+    y = x（直传）/ y = "..." + x / f-string 含 x（拼接传播）→ y 同样视为污点。"""
+    expanded: Set[str] = set(params)
+    changed = True
+    guard = 0
+    while changed and guard < 10:
+        changed = False
+        guard += 1
+        for ln in lines:
+            if len(ln) > 4096:
+                ln = ln[:4096]
+            if "=" not in ln or ln.strip().startswith("#"):
+                continue
+            m = re.match(r'^\s*(\w+)\s*=\s*(.+)$', ln)
+            if not m:
+                continue
+            lhs, rhs = m.group(1), m.group(2)
+            if lhs in expanded:
+                continue
+            if any(re.search(_taint_var_pattern(v), rhs) for v in expanded):
+                expanded.add(lhs)
+                changed = True
+    return expanded
+
+
+# v4.9.5：跨文件污点 sink 模式（只匹配被注入参数直接流入的危险调用）
+_CROSS_SINK_PATTERNS = [
+    (r'''(?<!self)\.(execute|query|raw)\s*\(|(?<![\w.])execute\s*\(\s*[a-zA-Z_]''',
+     "SQL注入", "critical", "污点参数流入SQL查询（跨文件数据流，需人工确认）"),
+    (r'''os\.system\s*\([^"']|os\.popen\s*\([^"']|subprocess\.(call|run|Popen)\s*\(\s*(?!\[|["'])''',
+     "命令注入", "critical", "污点参数流入命令执行（跨文件数据流，需人工确认）"),
+    (r'''(?<!def\s)(?<![\w.])\bopen\s*\(|send_file\s*\(''',
+     "路径遍历", "high", "污点参数流入文件路径（跨文件数据流，需人工确认）"),
+    (r'''(requests|httpx)\.(get|post|put|delete|head|patch)\s*\(|urllib\.(request\.)?urlopen\s*\(''',
+     "SSRF", "high", "污点参数流入URL请求（跨文件数据流，需人工确认）"),
+    (r'''(?<!def\s)\bredirect\s*\(''',
+     "开放重定向", "medium", "redirect 目标来自跨文件污点参数（需人工确认）"),
+]
+
+
+def _is_safe_cross_sql_call(line: str, params: List[str]) -> bool:
+    """跨文件 SQL sink 豁免：污点在 execute 绑定参数位（第二参）→ 参数化安全。
+    任一污点变量出现在 SQL 第一参（拼接/直传）→ 必报。"""
+    mc = re.search(r'''\.(?:execute|query|raw)\s*\((.*)$''', line)
+    if not mc:
+        mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
+    if not mc:
+        return True
+    argstr = mc.group(1)
+    if "," in argstr:
+        first = argstr.split(",", 1)[0]
+        return not any(re.search(_taint_var_pattern(p), first) for p in params)
+    return False
+
+
+def _is_orm_query_line(line: str) -> bool:
+    """v4.9.5 第4轮：ORM 查询白名单豁免——session.query/df.query/db.query/.objects.
+    等是对象查询而非 SQL 字符串拼接，小白友好：宁漏不误。"""
+    return bool(re.search(r'''(?:session|db|df|engine|model|models)\.query\s*\(|\.objects\.''', line))
+
+
+def _cross_file_sink_scan(target_rel: str, lines: List[str], expanded: List[str],
+                          src_desc: str, issues: List[Dict[str, object]],
+                          severity_count: Dict[str, int], reported: Set[tuple]) -> None:
+    """对注入参数（含传播变量）所在文件补扫危险 sink：直接流入才报，def 行/安全形态豁免。
+    reported: (file,line,type) 已报集合——同一 sink 行只报一次（防多条注入重复刷屏）。"""
+    var_res = [_taint_var_pattern(p) for p in expanded]
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith("#") or re.match(r'^\s*(async\s+)?def\s+', line):
+            continue
+        if not any(re.search(vr, line) for vr in var_res):
+            continue
+        for pattern, itype, sev, desc in _CROSS_SINK_PATTERNS:
+            if not re.search(pattern, line):
+                continue
+            if itype == "SQL注入" and (_is_safe_cross_sql_call(line, expanded)
+                                       or _is_orm_query_line(line)):
+                continue
+            if itype == "命令注入" and re.search(r'''Popen\s*\(\s*\[''', line):
+                continue
+            key = (target_rel, i, itype)
+            if key in reported:
+                break
+            reported.add(key)
+            issues.append({"file": target_rel, "line": i, "type": itype,
+                           "severity": sev, "desc": desc + f"（来源: {src_desc}）",
+                           "code": stripped[:100]})
+            severity_count[sev] += 1
+            break
+
+
+def _cross_file_taint_pass(cross_calls: List[Dict[str, object]],
+                           file_imports: Dict[str, Dict[str, str]],
+                           file_from_imports: Dict[str, Dict[str, tuple]],
+                           file_func_params: Dict[str, Dict[str, List[str]]],
+                           file_lines_cache: Dict[str, List[str]],
+                           tree_files: List[str], root: Optional[str],
+                           issues: List[Dict[str, object]],
+                           severity_count: Dict[str, int]) -> None:
+    """v4.9.5 跨文件污点第二阶段：把强污点实参映射到被调函数参数，注入后补扫 sink。
+    支持两层透传链（a→b→c：b 把注入参数原样传给 c 模块函数则继续注入），
+    每层对目标文件做轻量传播扩展（y = x / y = ".." + x），命中带来源追溯。"""
+    module_to_path = {}
+    for fpath in tree_files:
+        rel = os.path.relpath(fpath, root) if root else fpath
+        base = os.path.splitext(rel)[0]
+        if rel.endswith("__init__.py"):
+            base = os.path.dirname(rel)
+        module_to_path[base.replace(os.sep, ".")] = rel
+
+    pending = list(cross_calls)
+    handled = set()  # (caller_rel, caller_line, module, func) 去重，防循环
+    reported = set()  # (file, line, type) 已报 sink 行，防重复刷屏
+    processed = set()  # (target_rel, 注入参数) 已注入处理，防同参重复全文件扫描
+    for _depth in range(2):  # 最多两层：a→b→c
+        if not pending:
+            break
+        next_pending = []
+        for cc in pending:
+            key = (str(cc.get("caller_rel")), int(cc.get("caller_line", 0)),
+                   str(cc["module"]), str(cc["func"]))
+            if key in handled:
+                continue
+            handled.add(key)
+            target_rel = module_to_path.get(str(cc["module"]))
+            if not target_rel or target_rel not in file_lines_cache:
+                continue  # 标准库/第三方模块（如 os/sqlite3）映射不到文件，天然跳过
+            params = file_func_params.get(target_rel, {}).get(str(cc["func"]), [])
+            if not params:
+                continue
+            if cc.get("arg_name"):
+                if cc["arg_name"] not in params:
+                    continue
+                injected = [str(cc["arg_name"])]
+            else:
+                idx = int(cc["arg_pos"])
+                if idx >= len(params):
+                    continue
+                injected = [params[idx]]
+            if (target_rel, tuple(injected)) in processed:
+                continue
+            processed.add((target_rel, tuple(injected)))
+            src_desc = str(cc["src_desc"])
+            # 目标文件内轻量传播扩展 + sink 补扫
+            expanded = _expand_taint_in_file(file_lines_cache[target_rel], injected)
+            _cross_file_sink_scan(target_rel, file_lines_cache[target_rel],
+                                  sorted(expanded), src_desc, issues, severity_count,
+                                  reported)
+            # 透传链：目标文件把注入参数原样传给别的模块函数 → 下一层注入（来源一路追溯）
+            tv = {p: "user" for p in expanded}
+            for sub in _collect_cross_calls(file_lines_cache[target_rel],
+                                            file_imports.get(target_rel, {}),
+                                            tv, target_rel,
+                                            file_from_imports.get(target_rel)):
+                sub["src_desc"] = f"{sub['src_desc']} ← {src_desc}"
+                next_pending.append(sub)
+        pending = next_pending
 
 
 def _security_suggestions(sev: Dict[str, int], total: int) -> List[str]:
