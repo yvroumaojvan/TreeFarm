@@ -1082,19 +1082,217 @@ def calculate_debt(tree_files: List[str], bank: Any, module_map: Dict[str, str],
 
 
 # ============================================================
+# Java 安全规则（v4.8.3 新增，零依赖启发式，需人工确认）
+# ============================================================
+
+def _scan_java_security(lines, issues, severity_count, rel):
+    """Java 启发式安全规则：
+    1) 命令执行入口：ProcessBuilder / Runtime.exec 参数含动态成分（变量/拼接/调用）
+       —— 纯字符串字面量不报（如 new ProcessBuilder("ls", "-l")）
+    2) 无界绑定：ServerSocket 绑 0.0.0.0 / ::（局域网可访问，提醒配套鉴权）
+    3) 传感器高速采样：registerListener 第 4 参 SENSOR_DELAY_FASTEST(2)
+    """
+    for i, line in enumerate(lines, 1):
+        # v4.9.2 行长护栏：超长行截断（防 [^)]* 等模式灾难性回溯）
+        if len(line) > 32768:
+            line = line[:32768]
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "*", "/*")):
+            continue
+
+        # 1) 命令执行入口
+        for m in re.finditer(
+                r'''(?:new\s+ProcessBuilder|Runtime\.getRuntime\(\)\.exec)\s*\(([^)]*)\)''',
+                line):
+            args = m.group(1)
+            rest = re.sub(r'"[^"]*"', '', args)
+            if re.search(r'[a-zA-Z_]\w*|\+', rest):
+                issues.append({
+                    "file": rel, "line": i, "type": "命令执行",
+                    "severity": "high",
+                    "desc": "命令执行入口：ProcessBuilder/Runtime.exec 参数含动态"
+                            "成分（变量/拼接）。若命令来自外部输入，务必先做"
+                            "白名单/校验，防止命令注入",
+                    "code": stripped[:100]})
+                severity_count["high"] += 1
+                break
+
+        # 2) 无界绑定（0.0.0.0 / ::）
+        if re.search(r'''InetSocketAddress\s*\(\s*["']0\.0\.0\.0["']''', line) or \
+           re.search(r'''InetSocketAddress\s*\(\s*["']::["']''', line) or \
+           re.search(r'''\.bind\s*\([^)]*["']0\.0\.0\.0["']''', line) or \
+           re.search(r'''\.bind\s*\([^)]*["']::["']''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "无界绑定",
+                "severity": "medium",
+                "desc": "服务绑定所有接口(0.0.0.0/::)：局域网/公网可达。"
+                        "确认是否配有鉴权（token/口令/ip 白名单），否则可能被"
+                        "远程直接调用",
+                "code": stripped[:100]})
+            severity_count["medium"] += 1
+
+        # 3) 传感器 SENSOR_DELAY_FASTEST（第 4 参为 2）
+        if re.search(r'''registerListener\s*\([^)]*,\s*2\s*,''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "传感器高速采样",
+                "severity": "low",
+                "desc": "registerListener 用 SENSOR_DELAY_FASTEST(2)：最高采样率，"
+                        "频繁调用明显耗电。确认是否必要（一般 1/3 档够用）",
+                "code": stripped[:100]})
+            severity_count["low"] += 1
+
+        # 4) 敏感数据明文持久化：SharedPreferences 写入名字含 api/key/token/secret
+        if re.search(r'''putString\s*\(''', line) and \
+           re.search(r'''(?i)(api[_ -]?key|token|passw|secret|[_ -]key["']?\s*,)''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "敏感信息存储",
+                "severity": "medium",
+                "desc": "SharedPreferences 明文写入疑似敏感数据（名字含 "
+                        "api/key/token/secret）。明文存储可被 root/备份/其他应用"
+                        "读取，敏感凭据建议用 Keystore 加密后再存",
+                "code": stripped[:100]})
+            severity_count["medium"] += 1
+
+        # 5) 硬编码 API Key（sk- 前缀的长字符串字面量）
+        if re.search(r'''["']sk-[A-Za-z0-9_\-]{12,}["']''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "硬编码密钥",
+                "severity": "high",
+                "desc": "源码硬编码 API Key（sk-…）：密钥随代码泄露即永久失效，"
+                        "应移到运行时环境变量/安全存储",
+                "code": stripped[:100]})
+            severity_count["high"] += 1
+
+        # 6) 手电筒 setTorchMode：Android 8+ 需要 CAMERA 权限，检查 Manifest 声明
+        if re.search(r'''setTorchMode\s*\(''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "权限提示",
+                "severity": "low",
+                "desc": "使用 setTorchMode 需要 CAMERA 权限（Android 8.0+ / "
+                        "targetSdk 31+ 强制），确认 Manifest 已声明 <uses-permission "
+                        "android.permission.CAMERA>，否则运行时必抛 SecurityException",
+                "code": stripped[:100]})
+            severity_count["low"] += 1
+
+        # 7) 命令执行仅靠黑名单/开关保护（黑名单可绕过 → 跳过确认直接执行）
+        #    行窗口=当前行 + 前一行（条件与执行常拆成两行）
+        if re.search(r'''(?:ShizukuShell\.exec|Runtime\.getRuntime\(\)\.exec|ProcessBuilder)\s*\(''',
+                     line):
+            window = (lines[i - 2] if i >= 2 else "") + line
+            if re.search(r'''(?i)\b(isDangerous|confirmEnabled|allowRootShell|requireConfirm)\b''',
+                         window):
+                issues.append({
+                    "file": rel, "line": i, "type": "命令执行保护薄弱",
+                    "severity": "high",
+                    "desc": "命令执行仅依赖黑名单/开关判定（isDangerous/confirmEnabled…）"
+                            "——黑名单可被变量拼接、dash -c 等手法绕过；一旦绕过将"
+                            "跳过用户确认直接执行。建议全部命令统一走用户确认弹窗",
+                    "code": stripped[:100]})
+                severity_count["high"] += 1
+
+        # 8) 敏感数据写入文件（配置/备份落盘）：确认加密与权限收紧
+        if re.search(r'''(?:Files\.write|FileOutputStream|openFileOutput)\s*\(''', line) and \
+           re.search(r'''(?i)(api[_ -]?key|apiKey|token|password|secret)''', line):
+            issues.append({
+                "file": rel, "line": i, "type": "敏感数据落盘",
+                "severity": "medium",
+                "desc": "敏感数据（api key/token/secret）写入文件——确认已加密且"
+                        "文件权限收紧（如 600）。若明文写入公共/备份目录，文件"
+                        "一旦泄漏即凭据泄露",
+                "code": stripped[:100]})
+            severity_count["medium"] += 1
+
+        # 9) 任意文件删除：File/Files 删除操作的路径来自变量（Binder/外部输入）
+        if (re.search(r'''new\s+File\s*\(\s*[a-zA-Z_]\w*[^)]*\)\s*\.delete\s*\(\s*\)''',
+                      line) or \
+            re.search(r'''Files\.delete\s*\(\s*[a-zA-Z_]\w*''', line) or \
+            (re.search(r'''\.deleteOnExit\s*\(\s*\)''', line) and
+             re.search(r'''new\s+File\s*\(\s*[a-zA-Z_]\w*''', line))) and \
+                not any(x["type"] == "任意文件删除" for x in issues):
+            issues.append({
+                "file": rel, "line": i, "type": "任意文件删除",
+                "severity": "high",
+                "desc": "文件删除路径来自变量（可能是外部/Binder 传入）：若调用方"
+                        "可控且进程有 root/高权限，可构造任意路径删除系统文件；"
+                        "建议校验路径白名单 + Binder 调用方 UID",
+                "code": stripped[:100]})
+            severity_count["high"] += 1
+
+        # 9b) 删除类方法签名 + new File(参数) 组合（工具函数包装的删除，如 i.N(new File(str))）
+        mdel = re.search(r'''\b(remove|delete|unlink)\s*\(\s*[^)]*\bString\s+([a-zA-Z_]\w*)''',
+                         line)
+        if mdel:
+            pname = mdel.group(2)
+            window = "".join(lines[i - 1:min(i + 2, len(lines))])
+            if re.search(r'''new\s+File\s*\(\s*''' + re.escape(pname) + r'''\b''', window):
+                if not any(x["type"] == "任意文件删除" for x in issues):
+                    issues.append({
+                        "file": rel, "line": i, "type": "任意文件删除",
+                        "severity": "high",
+                        "desc": f"删除/移除类方法参数 {pname} 直接构造文件删除"
+                                "（可被外部/Binder 传入）：高权限下可删任意路径，"
+                                "建议白名单 + UID 校验",
+                        "code": stripped[:100]})
+                    severity_count["high"] += 1
+
+        # 10) 加固壳识别（小白友好）：apk 被加固时 Java 层分析面为空
+        if re.search(r'''(?i)(libjiagu|com\.qihoo\.util|com\.stub\.StubApp|360jiagu)''',
+                     line):
+            issues.append({
+                "file": rel, "line": i, "type": "加固提示",
+                "severity": "low",
+                "desc": "疑似加固壳（360/libjiagu/StubApp）：真实代码在 native 加密层，"
+                        "反编译 Java 层仅剩壳 → 静态分析面为空不代表无漏洞，"
+                        "需脱壳或动态分析",
+                "code": stripped[:100]})
+            severity_count["low"] += 1
+
+
+def _scan_java_file_level(lines, issues, severity_count, rel):
+    """Java 安全文件级弱信号（v4.9.0）：黑名单式 contains 判定反模式。
+
+    特征：String[] 数组字面量含明显黑名单词汇（rm -/bank/wallet/alipay/wipe 等）
+    且文件内用 contains(/indexOf( 子串匹配判定——这种写法可被大小写/拼接变体
+    绕过，且名单外项目直接漏过（默认放行）。
+    """
+    full = "".join(lines)
+    blacklist_arr = re.search(
+        r'''String\[\]\s*\w+\s*=\s*\{[^}]*["'](?:rm\s+-|bank|wallet|alipay|'''
+        r'''unionpay|paypal|wipe|erase|format|secret)''', full)
+    if not blacklist_arr:
+        return
+    uses_contains = (re.search(r'''[a-zA-Z_]\w*\s*\.contains\s*\(\s*[a-zA-Z_]\w*\s*\)''', full)
+                     or re.search(r'''contains\s*\(\s*[a-zA-Z_]\w*\[[a-zA-Z_0-9]+\]''', full)
+                     or re.search(r'''indexOf\s*\(\s*[a-zA-Z_]\w*\[[a-zA-Z_0-9]+\]''', full))
+    if not uses_contains:
+        return
+    issues.append({
+        "file": rel, "line": 0, "type": "黑名单绕过风险",
+        "severity": "medium",
+        "desc": "发现黑名单式判定：字符串数组 + contains/indexOf 子串匹配。"
+                "子串匹配可被大小写/拼接/变体绕过，名单外的项目默认放行；"
+                "建议改白名单或精确匹配，并对名单外项目默认拒绝",
+        "code": "[文件级]"})
+    severity_count["medium"] += 1
+
+
+# ============================================================
 # 安全漏洞检测模块 (v4.0 新增)
 # ============================================================
 
 def detect_security_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
     """检测安全漏洞：SQL注入、XSS、命令注入、路径遍历、硬编码密码、不安全反序列化、弱哈希、
     SSRF、JWT、XXE、开放重定向、认证绕过"""
-    _SECURITY_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".vue"}
+    # v4.8.3：加入 .java（走 _scan_java_security 启发式规则，见下）
+    _SECURITY_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".vue",
+                      ".java"}
 
     issues = []
     severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
 
     for fpath in tree_files:
-        if os.path.splitext(fpath)[1].lower() not in _SECURITY_EXTS:
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext not in _SECURITY_EXTS:
             continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
@@ -1104,6 +1302,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
 
         rel = os.path.relpath(fpath, root) if root else fpath
         full_text = "".join(lines)
+
+        # v4.8.3：Java 文件走专用启发式安全规则，跳过下方 Python 语法规则
+        if ext == ".java":
+            _scan_java_security(lines, issues, severity_count, rel)
+            # v4.9.0：文件级弱信号（黑名单 contains 反模式）
+            _scan_java_file_level(lines, issues, severity_count, rel)
+            continue
 
         # v4.5 新增：污点变量收集（轻量级跨行数据流跟踪）
         # 识别「用户输入源 → 变量赋值」的传播链，解决单行正则检测不到跨行数据流的问题
@@ -1117,34 +1322,42 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     if param and param != "self" and param != "cls":
                         tainted_vars.add(param)
         for ln in lines:
+            if len(ln) > 4096:
+                ln = ln[:4096]  # v4.9.2：污点收集只看行首，超长行截断防 ReDoS
             ln_strip = ln.strip()
             if ln_strip.startswith("#"):
                 continue
+            # v4.9.2 防 ReDoS：无等号的行跳过所有 (\w+)= 匹配（避免 \w+ 在超长行上 O(n²) 回溯）
+            if "=" not in ln:
+                continue
             # 用户输入源直接赋值：x = request.args.get("..") / x = input(..) / x = request.form[".."]
-            m = re.search(r'''(\w+)\s*=\s*request\.(?:args|form|values|json|data)\.get\s*\(''', ln)
+            m = re.search(r'''(\w{1,64})\s*=\s*request\.(?:args|form|values|json|data)\.get\s*\(''', ln)
             if not m:
-                m = re.search(r'''(\w+)\s*=\s*request\.(?:args|form|values|json|files)\s*\[['"]''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*request\.(?:args|form|values|json|files)\s*\[['"]''', ln)
             if not m:
-                m = re.search(r'''(\w+)\s*=\s*input\s*\(''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*input\s*\(''', ln)
             if not m:
-                m = re.search(r'''(\w+)\s*=\s*sys\.argv\[''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*sys\.argv\[''', ln)
             if not m:
-                m = re.search(r'''(\w+)\s*=\s*(?:params|request\.query|self\.request)\s*\.get\s*\(''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*(?:params|request\.query|self\.request)\s*\.get\s*\(''', ln)
             if m:
                 tainted_vars.add(m.group(1))
             # 污点传播：y = x（x 是污点变量）
-            m2 = re.search(r'''(\w+)\s*=\s*(\w+)\s*(?:\.strip\(\)|\.lower\(\))?\s*$''', ln)
+            m2 = re.search(r'''(\w{1,64})\s*=\s*(\w{1,64})\s*(?:\.strip\(\)|\.lower\(\))?\s*$''', ln)
             if m2 and m2.group(2) in tainted_vars:
                 tainted_vars.add(m2.group(1))
             # 污点传播（拼接赋值）：x = "..." + y  或  x = f"...{y}..."（右边表达式含污点变量 y）
-            m3 = re.search(r'''(\w+)\s*=\s*(.+)$''', ln)
-            if m3:
+            m3 = re.search(r'''(\w{1,64})\s*=\s*(.+)$''', ln)
+            if m3 and len(m3.group(2)) <= 8192:  # v4.9.2：超长右值跳过（避免 in 大串）
                 lhs, rhs = m3.group(1), m3.group(2)
                 if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))):
                     if any(v in rhs for v in tainted_vars):
                         tainted_vars.add(lhs)
 
         for i, line in enumerate(lines, 1):
+            # v4.9.2 行长护栏：超长行截断到 32KB（防正则灾难性回溯，检测能力不受影响）
+            if len(line) > 32768:
+                line = line[:32768]
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
@@ -1153,6 +1366,9 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             if '"pattern"' in line or "'pattern'" in line:
                 if re.search(r'''["']pattern["']\s*:\s*["']''', line):
                     continue
+            # v4.9.2：跳过 Python 正则字面量行（r'…' / r"…"，规则库文件防自我误报）
+            if re.search(r'''\br(?=["'])''', line):
+                continue
 
             # 1. SQL注入检测
             sql_patterns = [
@@ -1849,7 +2065,7 @@ class _PerfVisitor(ast.NodeVisitor):
                     continue
 
                 self._add(s.lineno, "资源泄漏", "medium",
-                          f"资源 {var} 由 {'open()' if is_open else 'socket.socket()'} 创建，未使用 with 且函数内无 {var}.close()，可能泄漏文件句柄/连接，建议改用 with 或补充 close()")
+                          f"资源 {var} 由{'打开文件' if is_open else '创建套接字'}创建，未使用 with 且函数内无 {var}.close()，可能泄漏文件句柄/连接，建议改用 with 或补充 close()")
         except Exception:
             pass
 

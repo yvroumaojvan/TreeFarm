@@ -124,6 +124,12 @@ class LLMClient:
                 if env == "TREEFARM_API_KEY":
                     self.base_url = os.environ.get("TREEFARM_API_URL", "https://api.deepseek.com/v1")
                     self.model = os.environ.get("TREEFARM_MODEL", "deepseek-chat")
+                elif env == "OPENAI_API_KEY":
+                    # v4.9.0：自动复用用户已配好的 OpenAI 兼容端点（DeepSeek/中转站等），
+                    # 不再硬连 api.openai.com（国内连不上）
+                    self.base_url = os.environ.get("OPENAI_BASE_URL",
+                                                   "https://api.openai.com/v1")
+                    self.model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
                 else:
                     self.base_url = url
                     self.model = model

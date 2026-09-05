@@ -30,6 +30,25 @@ from .storage import GeneBank, Session, SmallTree, TrashBin, WeedIndex
 
 log = logging.getLogger("treefarm")
 
+# v4.8.3：安全关键文件强制进核心（防漏洞核心被「杂草省 token」跳过）
+_SECURITY_CORE_HINTS = ("guard", "shell", "security", "auth", "token",
+                        "crypto", "secret", "ssl", "tls", "exec", "bridge",
+                        "proxy")
+
+
+def _is_security_core(path: str) -> bool:
+    """文件名或所在路径段含安全关键词 → 强制当核心大树（不当杂草）。
+
+    例：DangerShellGuard.java / ShizukuShell.java / ExecBridge.java /
+    LanProxyService.java 等安全关键文件即使没人引用也要深度检测。
+    """
+    low = path.lower().replace(os.sep, "/")
+    base = os.path.basename(low)
+    for hint in _SECURITY_CORE_HINTS:
+        if hint in base or ("/" + hint) in low:
+            return True
+    return False
+
 
 class TreeFarm:
     def __init__(self, root: str):
@@ -1026,7 +1045,13 @@ class TreeFarm:
         ranked = sorted(tree, key=lambda f: (-len(refs_of[f]), -genes_of[f]))
         has_ref = [f for f in ranked if refs_of[f]]
         core = has_ref if has_ref else ranked[:max(1, len(ranked) // 2)]
-        weeds = [f for f in ranked if f not in core]
+        # v4.8.3：安全关键文件强制进核心（防漏洞核心被「杂草省 token」跳过）
+        core_set = set(core)
+        for f in ranked:
+            if _is_security_core(f):
+                core_set.add(f)
+        core = [f for f in ranked if f in core_set]
+        weeds = [f for f in ranked if f not in core_set]
         hub_line = max(1, len(core) // 2) if core else 1
 
         # ===== 2. 静态检测全扫一次，按文件分组 =====
@@ -1161,7 +1186,13 @@ class TreeFarm:
         ranked = sorted(tree, key=lambda f: (-len(refs_of[f]), -genes_of[f]))
         has_ref = [f for f in ranked if refs_of[f]]
         core = has_ref if has_ref else ranked[:max(1, len(ranked) // 2)]
-        weeds = [f for f in ranked if f not in core]
+        # v4.8.3：安全关键文件强制进核心（防漏洞核心被「杂草省 token」跳过）
+        core_set = set(core)
+        for f in ranked:
+            if _is_security_core(f):
+                core_set.add(f)
+        core = [f for f in ranked if f in core_set]
+        weeds = [f for f in ranked if f not in core_set]
 
         # ===== 2. 静态检测全扫（引路线索） =====
         sec = detect_security_issues(tree, root=root)
