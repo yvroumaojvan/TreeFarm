@@ -1378,11 +1378,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''execute\s*\(\s*["'].*?\{.*?\}.*?["']\.format''', "SQL注入：format拼接查询"),
                 (r'''cursor\.execute\s*\(\s*["'].*?\+''', "SQL注入：cursor拼接查询"),
             ]
+            sql_hits = set()
             for pattern, desc in sql_patterns:
                 if re.search(pattern, line):
                     issues.append({"file": rel, "line": i, "type": "SQL注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
+                    sql_hits.add(i)
                     break
 
             # 2. 命令注入检测
@@ -1606,6 +1608,8 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''(execute|query)\s*\([^)]*\+[^)]*\)''', "SQL注入：字符串拼接SQL查询"),
             ]
             for pattern, desc in sql_injection_patterns:
+                if i in sql_hits:
+                    break  # v4.9.3：基础层已报同一行，跳过防重复刷屏
                 if re.search(pattern, line, re.IGNORECASE):
                     # v4.5 改进：排除参数化查询——含 ? 占位符的 f-string 中，
                     # {} 只是生成占位符数量（如 {marks} = "?,?,?"），是安全的
@@ -1780,12 +1784,29 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                         re.search(r'''(?<!self)\.(execute|query|raw)\s*\(''', line)
                         or re.search(r'''(?<![\w.])execute\s*\(\s*[a-zA-Z_]''', line)):
                     if any(v in line for v in tainted_vars):
-                        # 排除纯占位符参数化（参数是 ? 或 (sql, params) 的 params 部分）
-                        if "?" not in line.split("(")[-1] or "=" in line:
-                            issues.append({"file": rel, "line": i, "type": "SQL注入",
-                                           "severity": "critical", "desc": "污点变量流入SQL查询（跨行数据流）", "code": stripped[:100]})
-                            severity_count["critical"] += 1
+                        # v4.9.3 三种安全形态豁免（sql对照靶场实测驱动，修参数化/静态 SQL 误报）：
+                        #   A. 单行拼接形态（f"/"+/%/.format）——基础正则规则已覆盖，跳过防重复刷屏
+                        #   B. 参数化绑定 execute(sql, params)——逗号分隔的第二参数是绑定参数，安全
+                        #   C. 纯静态 SQL execute("SELECT ...")——字符串字面量内无变量拼接，安全
+                        argstr = ""
+                        mc = re.search(r'''\.(?:execute|query|raw)\s*\((.*)$''', line)
+                        if not mc:
+                            mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
+                        if mc:
+                            argstr = mc.group(1)
+                        concat_mark = re.search(r'''["']\s*\+|\+\s*["']|f["']|\.format\s*\(|["']\s*%\s|%\s*\(''', argstr)
+                        if concat_mark:
                             continue
+                        if "," in argstr:
+                            first_arg = argstr.split(",", 1)[0].strip()
+                            if not re.search(r'''f["']|["'][^"']*["']\s*\+''', first_arg):
+                                continue
+                        elif re.match(r'''["'][^"']*["']\s*\)?$''', argstr.strip()):
+                            continue
+                        issues.append({"file": rel, "line": i, "type": "SQL注入",
+                                       "severity": "critical", "desc": "污点变量流入SQL查询（跨行数据流）", "code": stripped[:100]})
+                        severity_count["critical"] += 1
+                        continue
                 # SSRF：requests/httpx/urllib 请求含污点变量
                 if re.search(r'''(requests|httpx)\.(get|post|put|delete|head|patch)\s*\(''', line) or re.search(r'''urllib\.(request\.)?urlopen\s*\(''', line):
                     issues.append({"file": rel, "line": i, "type": "SSRF",
