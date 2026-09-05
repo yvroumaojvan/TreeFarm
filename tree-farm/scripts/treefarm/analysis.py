@@ -1312,15 +1312,26 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
 
         # v4.5 新增：污点变量收集（轻量级跨行数据流跟踪）
         # 识别「用户输入源 → 变量赋值」的传播链，解决单行正则检测不到跨行数据流的问题
-        tainted_vars = set()
-        # 函数参数视为潜在不可信输入（外部调用者传入的值可能来自用户）
+        # v4.9.4：污点升级为来源分级 dict（param=函数参数弱污点 < concat=拼接传播 < user=用户输入直接源）。
+        # 危险 sink（SQL/命令/文件/redirect）只对强污点（user/concat）必报，纯 param 豁免——
+        # 「函数参数全标污点」是 tornado template.execute(add=add)/def open(self, *args) 误报总根源：
+        # 顶级项目里几乎每个函数都有参数，参数本身不等于用户输入。
+        tainted_vars: Dict[str, str] = {}
+
+        def _mark_taint(var: str, src: str) -> None:
+            _src_rank = {"param": 1, "concat": 2, "user": 3}
+            if var and (var not in tainted_vars
+                        or _src_rank[src] > _src_rank.get(tainted_vars[var], 0)):
+                tainted_vars[var] = src
+
+        # 函数参数 → param 弱污点（外部调用者可能传用户值，但需拼接/传播才升级为可报）
         for ln in lines:
             fm = re.search(r'''^\s*def\s+\w+\s*\(([^)]*)\)''', ln)
             if fm:
                 for param in fm.group(1).split(","):
                     param = param.strip().split("=")[0].strip().lstrip("*")
                     if param and param != "self" and param != "cls":
-                        tainted_vars.add(param)
+                        _mark_taint(param, "param")
         for ln in lines:
             if len(ln) > 4096:
                 ln = ln[:4096]  # v4.9.2：污点收集只看行首，超长行截断防 ReDoS
@@ -1341,18 +1352,20 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             if not m:
                 m = re.search(r'''(\w{1,64})\s*=\s*(?:params|request\.query|self\.request)\s*\.get\s*\(''', ln)
             if m:
-                tainted_vars.add(m.group(1))
-            # 污点传播：y = x（x 是污点变量）
+                _mark_taint(m.group(1), "user")
+            # 污点传播：y = x（x 是污点变量，来源继承）
             m2 = re.search(r'''(\w{1,64})\s*=\s*(\w{1,64})\s*(?:\.strip\(\)|\.lower\(\))?\s*$''', ln)
             if m2 and m2.group(2) in tainted_vars:
-                tainted_vars.add(m2.group(1))
+                _mark_taint(m2.group(1), tainted_vars[m2.group(2)])
             # 污点传播（拼接赋值）：x = "..." + y  或  x = f"...{y}..."（右边表达式含污点变量 y）
             m3 = re.search(r'''(\w{1,64})\s*=\s*(.+)$''', ln)
             if m3 and len(m3.group(2)) <= 8192:  # v4.9.2：超长右值跳过（避免 in 大串）
                 lhs, rhs = m3.group(1), m3.group(2)
                 if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))):
-                    if any(v in rhs for v in tainted_vars):
-                        tainted_vars.add(lhs)
+                    hits = [v for v in tainted_vars if v in rhs]
+                    if hits:
+                        # 拼接传播：操作数含 user 则升级 user，否则 concat（拼接本身即注入形态）
+                        _mark_taint(lhs, "user" if any(tainted_vars[v] == "user" for v in hits) else "concat")
 
         for i, line in enumerate(lines, 1):
             # v4.9.2 行长护栏：超长行截断到 32KB（防正则灾难性回溯，检测能力不受影响）
@@ -1393,7 +1406,8 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''os\.popen\s*\(\s*[^"']''', "命令注入：os.popen接收变量"),
                 (r'''subprocess\.(call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True''',
                  "命令注入：subprocess shell=True"),
-                (r'''subprocess\.(call|run|Popen)\s*\(\s*[^"'].*?\+''', "命令注入：subprocess拼接命令"),
+                (r'''subprocess\.(call|run|Popen)\s*\(\s*(?!\[)[^"'].*?\+''',
+                 "命令注入：subprocess拼接命令"),
             ]
             for pattern, desc in cmd_patterns:
                 if re.search(pattern, line):
@@ -1404,7 +1418,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
 
             # 3. 路径遍历检测
             path_patterns = [
-                (r'''open\s*\(\s*[^"'].*?\+''', "路径遍历：open接收拼接路径"),
+                (r'''(?<!def\s)(?<![\w.])\bopen\s*\(\s*[^"'].*?\+''', "路径遍历：open接收拼接路径"),
                 (r'''open\s*\(\s*request\.''', "路径遍历：open接收用户输入"),
                 (r'''os\.path\.join\s*\([^)]*request\.''', "路径遍历：路径拼接用户输入"),
                 (r'''send_file\s*\(\s*[^"']''', "路径遍历：send_file接收变量"),
@@ -1442,7 +1456,14 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "硬编码服务密码"),
                 (r'''(private_key|PRIVATE_KEY)\s*=\s*["']-----BEGIN''', "硬编码私钥"),
             ]
+            # v4.9.4：占位符豁免——cookie_secret="__TODO:_GENERATE_YOUR_OWN_..." 是框架 demo
+            # 提示用户替换的占位符（tornado 4 个 demo 全带 __TODO 前缀），不是真实密钥泄露
+            is_placeholder_secret = re.search(
+                r'["\'][^"\']*?(__TODO_?|YOUR_OWN_|CHANGE_ME_|your_secret|your_key|_PLACEHOLDER)',
+                line, re.IGNORECASE)
             for pattern, desc in secret_patterns:
+                if is_placeholder_secret:
+                    break
                 if re.search(pattern, line, re.IGNORECASE):
                     issues.append({"file": rel, "line": i, "type": "硬编码凭据",
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
@@ -1498,10 +1519,14 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     severity_count["high"] += 1
                     break
 
-            # 6.8.1 CRLF注入增强检测（v4.3新增）
+            # 6.8.1 CRLF注入增强检测（v4.3新增，v4.9.4收紧：只认真用户输入源拼接进 HTTP 头）
+            # tornado web.py:1421 set_cookie 是官方安全实现（内部有 \x00-\x20 校验），
+            # 原规则用 name/get/data 等普通词触发，set_cookie 的参数名 name 就被误报。
             if re.search(r'headers\s*\[', line) or "set_cookie" in line or "add_header" in line:
-                if re.search(r'(f["\']|%|\.format|\+)', line):
-                    if re.search(r'(username|user_id|name|input|request|args|get|data)', line, re.IGNORECASE):
+                if re.search(r'(f["\']|\.format|\+\s|%\s*\()', line):
+                    # v4.9.4：request.headers[ 是写「自身的请求头」而非读取用户输入，
+                    # tornado simple_httpclient.py:394/402 的 Basic 认证/User-Agent 被误报
+                    if re.search(r'(request\.(?!headers\[)|input\(|params\[|args\[|form\[|sys\.argv)', line, re.IGNORECASE):
                         issues.append({"file": rel, "line": i, "type": "CRLF注入",
                                        "severity": "medium", "desc": "用户输入拼接到HTTP头，可通过\\r\\n注入任意HTTP头(CRLF Injection)", "code": stripped[:100]})
                         severity_count["medium"] += 1
@@ -1519,14 +1544,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
 
             # 6.9.1 临时文件竞争增强检测（v4.2.1新增）
             # 检测直接open /tmp/路径
+            # v4.9.4：删除「/tmp/路径变量赋值」宽泛规则——define("root_directory", default="/tmp/s3")
+            # 等配置默认值 / 模块级常量被误报，必须实际 open(.../tmp/...) 才构成固定临时文件风险。
             if re.search(r'open\s*\([^)]*["\']/tmp/', line):
                 issues.append({"file": rel, "line": i, "type": "临时文件竞争",
                                "severity": "medium", "desc": "使用固定/tmp路径，可能被符号链接攻击，应使用tempfile.mkstemp", "code": stripped[:100]})
-                severity_count["medium"] += 1
-            # 检测/tmp/路径变量赋值（后续可能被open使用）
-            if re.search(r'["\']/tmp/[a-zA-Z_]+', line):
-                issues.append({"file": rel, "line": i, "type": "临时文件竞争",
-                               "severity": "medium", "desc": "固定临时文件路径，存在竞争条件风险，应使用tempfile.mkstemp", "code": stripped[:100]})
                 severity_count["medium"] += 1
 
             # 6.9 临时文件竞争检测（v4.1新增）
@@ -1701,8 +1723,10 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     break
 
             # 9.6 开放重定向检测（v4.6新增：跳转目标来自用户输入）
+            # v4.9.4：删掉 next\b/url\b 参数名触发——tornado web.py:3171 self.redirect(url)
+            # 的 url 是方法内局部变量/参数，参数名不等于用户输入；此场景由污点层强污点接管。
             open_redirect_patterns = [
-                (r'''redirect\s*\(\s*(request\.|params\[|args\[|form\[|data\.|next\b|url\b)''',
+                (r'''redirect\s*\(\s*(request\.|params\[|args\[|form\[|data\.|input\()''',
                  "开放重定向：redirect 目标来自用户可控输入"),
                 (r'''redirect\s*\([^)]*(request\.args|request\.values|request\.form|request\.get)''',
                  "开放重定向：redirect 拼接用户提交参数"),
@@ -1710,8 +1734,6 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "开放重定向：响应头 Location 来自用户输入"),
                 (r'''headers\s*\[\s*["'](?:Location|location)["']\s*\]\s*=\s*(request\.|params\[|args\[|form\[)''',
                  "开放重定向：响应头 headers['Location'] 来自用户输入"),
-                (r'''return\s+(redirect|Response)\s*\(\s*next\b''',
-                 "开放重定向：next 参数直接用于跳转（应校验白名单）"),
             ]
             for pattern, desc in open_redirect_patterns:
                 if re.search(pattern, line):
@@ -1775,49 +1797,67 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 tainted_used = any(v in line for v in tainted_vars)
                 if not tainted_used:
                     continue
+                # v4.9.4 污点分级：纯函数参数（param）不直接构成风险，需强污点（user/concat）才报。
+                # 函数参数≠用户输入，这是 tornado template.execute(add=add)/def open(self,*args)
+                # 「污点变量流入SQL/文件路径」误报的总根源。行内显式出现用户输入源时直接兜底。
+                used_srcs = {tainted_vars[v] for v in tainted_vars if v in line}
+                strong_taint = "user" in used_srcs or "concat" in used_srcs
+                line_has_user_src = re.search(r'(request\.|input\s*\(|sys\.argv)', line)
+                should_report = strong_taint or bool(line_has_user_src)
                 # SQL 注入：execute/query/raw 的参数含污点变量
                 # 排除 def execute(...) 方法定义行、self.execute(...) 自定义方法调用，
                 # 以及 executor/runner/engine 等「代码执行器/任务执行器」（非 SQL 语义）
                 is_def = re.match(r'^\s*(async\s+)?def\s+', line)
                 executor_hit = re.search(r'''(?<![\w.])executor|runner|execute_code|run_code''', line)
-                if not is_def and not executor_hit and (
+                if not is_def and not executor_hit and should_report and (
                         re.search(r'''(?<!self)\.(execute|query|raw)\s*\(''', line)
                         or re.search(r'''(?<![\w.])execute\s*\(\s*[a-zA-Z_]''', line)):
-                    if any(v in line for v in tainted_vars):
-                        # v4.9.3 三种安全形态豁免（sql对照靶场实测驱动，修参数化/静态 SQL 误报）：
-                        #   A. 单行拼接形态（f"/"+/%/.format）——基础正则规则已覆盖，跳过防重复刷屏
-                        #   B. 参数化绑定 execute(sql, params)——逗号分隔的第二参数是绑定参数，安全
-                        #   C. 纯静态 SQL execute("SELECT ...")——字符串字面量内无变量拼接，安全
-                        argstr = ""
-                        mc = re.search(r'''\.(?:execute|query|raw)\s*\((.*)$''', line)
-                        if not mc:
-                            mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
-                        if mc:
-                            argstr = mc.group(1)
-                        concat_mark = re.search(r'''["']\s*\+|\+\s*["']|f["']|\.format\s*\(|["']\s*%\s|%\s*\(''', argstr)
-                        if concat_mark:
-                            continue
-                        if "," in argstr:
-                            first_arg = argstr.split(",", 1)[0].strip()
-                            if not re.search(r'''f["']|["'][^"']*["']\s*\+''', first_arg):
-                                continue
-                        elif re.match(r'''["'][^"']*["']\s*\)?$''', argstr.strip()):
-                            continue
-                        issues.append({"file": rel, "line": i, "type": "SQL注入",
-                                       "severity": "critical", "desc": "污点变量流入SQL查询（跨行数据流）", "code": stripped[:100]})
-                        severity_count["critical"] += 1
+                    # v4.9.3 三种安全形态豁免（sql对照靶场实测驱动，修参数化/静态 SQL 误报）：
+                    #   A. 单行拼接形态（f"/"+/%/.format）——基础正则规则已覆盖，跳过防重复刷屏
+                    #   B. 参数化绑定 execute(sql, params)——逗号分隔的第二参数是绑定参数，安全
+                    #   C. 纯静态 SQL execute("SELECT ...")——字符串字面量内无变量拼接，安全
+                    argstr = ""
+                    mc = re.search(r'''\.(?:execute|query|raw)\s*\((.*)$''', line)
+                    if not mc:
+                        mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
+                    if mc:
+                        argstr = mc.group(1)
+                    concat_mark = re.search(r'''["']\s*\+|\+\s*["']|f["']|\.format\s*\(|["']\s*%\s|%\s*\(''', argstr)
+                    if concat_mark:
                         continue
-                # SSRF：requests/httpx/urllib 请求含污点变量
-                if re.search(r'''(requests|httpx)\.(get|post|put|delete|head|patch)\s*\(''', line) or re.search(r'''urllib\.(request\.)?urlopen\s*\(''', line):
+                    if "," in argstr:
+                        first_arg = argstr.split(",", 1)[0].strip()
+                        if not re.search(r'''f["']|["'][^"']*["']\s*\+''', first_arg):
+                            continue
+                    elif re.match(r'''["'][^"']*["']\s*\)?$''', argstr.strip()):
+                        continue
+                    issues.append({"file": rel, "line": i, "type": "SQL注入",
+                                   "severity": "critical", "desc": "污点变量流入SQL查询（跨行数据流）", "code": stripped[:100]})
+                    severity_count["critical"] += 1
+                    continue
+                # SSRF：requests/httpx/urllib 请求含污点变量（v4.9.4：param 弱污点豁免）
+                if should_report and (
+                        re.search(r'''(requests|httpx)\.(get|post|put|delete|head|patch)\s*\(''', line)
+                        or re.search(r'''urllib\.(request\.)?urlopen\s*\(''', line)):
                     issues.append({"file": rel, "line": i, "type": "SSRF",
                                    "severity": "high", "desc": "污点变量流入URL请求（跨行数据流）", "code": stripped[:100]})
                     severity_count["high"] += 1
                     continue
                 # 路径遍历：open/send_file 含污点变量
-                if re.search(r'''(?<!with\s)(?<!as\s)\bopen\s*\(''', line) or re.search(r'''send_file\s*\(''', line):
+                # v4.9.4：排除 def open(...) 方法定义（websocket.py:400 误报根源）与 .open( 方法调用；param 弱污点豁免
+                if should_report and (
+                        re.search(r'''(?<!def\s)(?<![\w.])(?<!with\s)(?<!as\s)\bopen\s*\(''', line)
+                        or re.search(r'''send_file\s*\(''', line)):
                     issues.append({"file": rel, "line": i, "type": "路径遍历",
                                    "severity": "high", "desc": "污点变量流入文件路径（跨行数据流）", "code": stripped[:100]})
                     severity_count["high"] += 1
+                    continue
+                # v4.9.4 开放重定向（污点层）：redirect 目标为强污点变量才报（排除 def 方法定义行）。
+                # 基础层删掉 url\b/next\b 参数名触发后，这里接管「变量指向用户输入」的跨行场景。
+                if should_report and re.search(r'''(?<!def\s)\bredirect\s*\(''', line):
+                    issues.append({"file": rel, "line": i, "type": "开放重定向",
+                                   "severity": "medium", "desc": "redirect 目标来自污点变量（用户输入/拼接传播）", "code": stripped[:100]})
+                    severity_count["medium"] += 1
                     continue
 
     # v4.7 测试目录降级：测试代码里的「问题」多为测试用例本身（故意构造的脏数据/权限用例），
@@ -2159,6 +2199,9 @@ def detect_performance_issues(tree_files: List[str], root: Optional[str] = None)
 
     severity_count = {"high": 0, "medium": 0, "low": 0}
     for i in issues:
+        # v4.9.4：测试文件的 issue 打 scope=test（展示层移出核心段，与安全检测一致）
+        if _is_test_file(i["file"]):
+            i["scope"] = "test"
         severity_count[i["severity"]] += 1
     total = len(issues)
     perf_score = min(100, severity_count["high"] * 12 + severity_count["medium"] * 5 + severity_count["low"] * 2)
@@ -2245,6 +2288,11 @@ class _LogicVisitor(ast.NodeVisitor):
         return False
 
     def visit_BinOp(self, node):
+        # v4.9.4：ast.Mod 且左操作数是字符串字面量 = "%s" % var 字符串格式化，不是取模除法。
+        # tornado web.py 的 "%r" % value / "Missing argument %s" % arg_name 被误报「除以变量」根源。
+        if isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant):
+            self.generic_visit(node)
+            return
         if (isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod))
                 and isinstance(node.right, ast.Name)
                 and node.right.id not in self._SAFE_DIVISORS
@@ -2733,8 +2781,11 @@ def _is_concrete_subclass(subclass, base_name, tree):
     return True
 
 
-def _tree_starts_threads(tree) -> bool:
-    """AST 判定：是否真实「创建」了线程（threading.Thread(...)/ThreadPoolExecutor/裸 Thread(...)）。
+def _tree_starts_threads(tree, executors_are_threads: bool = True) -> bool:
+    """AST 判定：是否真实「创建」了线程。
+    - 硬线程（threading.Thread/Thread/_thread.start_new_thread 等）恒算真并发；
+    - 线程池（ThreadPoolExecutor 等）默认也算，但异步事件循环文件里它是
+      「offload 阻塞任务」的标准用法（tornado ioloop.py 误报根源），可排除。
     只认 Call 节点，字符串/规则库字样不算。"""
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
@@ -2748,22 +2799,23 @@ def _tree_starts_threads(tree) -> bool:
                 name = ast.unparse(f)
             except Exception:
                 continue
-        if name in ("Thread", "threading.Thread", "concurrent.futures.ThreadPoolExecutor",
-                    "ThreadPoolExecutor", "multiprocessing.pool.ThreadPool", "threading.ThreadPool"):
+        if name in ("Thread", "threading.Thread", "_thread.start_new_thread",
+                    "threading.start_new_thread", "threading.Timer"):
+            return True
+        if executors_are_threads and name in (
+                "concurrent.futures.ThreadPoolExecutor",
+                "ThreadPoolExecutor", "multiprocessing.pool.ThreadPool",
+                "threading.ThreadPool"):
             return True
     return False
 
 
 def _tree_uses_threading(tree) -> bool:
-    """AST 判定：代码里出现 threading. 属性访问（锁/本地/事件等线程原语）但未必起线程。
-    仍排除字符串字面量（Attribute 节点才算）。"""
-    for n in ast.walk(tree):
-        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-                and n.value.id in ("threading", "_thread")):
-            return True
-        if (isinstance(n, ast.Name) and n.id == "Thread"):
-            return True
-    return False
+    """v4.9.4：只认真实创建线程/线程池的 Call。
+    threading.RLock/Lock/local 等同步原语是保护手段而非并发源——
+    tornado template.py 只有 RLock 却被判「用线程」→ self._indent/self.line 竞态误报根源。
+    与 _tree_starts_threads 语义一致（Call 节点才算，字符串不算）。"""
+    return _tree_starts_threads(tree)
 
 
 def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
@@ -2781,9 +2833,13 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
         # 用 AST 找「真实线程创建调用」（threading.Thread/ThreadPoolExecutor/Thread(），
         # 避免把字符串/规则库里的 "threading.Thread" 字样误当线程（自检误报根源）。
         is_async_file = bool(re.search(r"\basync\s+def\b|\bawait\b", text))
-        has_real_threads = _tree_starts_threads(tree)
-        has_threads = has_real_threads or (
-            not is_async_file and _tree_uses_threading(tree))
+        # v4.9.4：异步事件循环 + 线程池 = offload 阻塞任务的标准模式（tornado
+        # ioloop.py ThreadPoolExecutor），主状态仍单线程维护 → 线程池不算竞态源；
+        # 显式 threading.Thread 恒算真并发。同步文件的线程池仍算。
+        if is_async_file:
+            has_threads = _tree_starts_threads(tree, executors_are_threads=False)
+        else:
+            has_threads = _tree_starts_threads(tree)
         vis = _LogicVisitor(lines, rel, has_threads)
         vis.visit(tree)
         vis._check_race(tree)
@@ -2796,6 +2852,9 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
 
     severity_count = {"high": 0, "medium": 0, "low": 0}
     for i in issues:
+        # v4.9.4：测试文件的 issue 打 scope=test（展示层移出核心段，与安全检测一致）
+        if _is_test_file(i["file"]):
+            i["scope"] = "test"
         severity_count[i["severity"]] += 1
     total = len(issues)
     logic_score = min(100, severity_count["high"] * 12 + severity_count["medium"] * 5 + severity_count["low"] * 2)

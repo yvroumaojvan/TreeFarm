@@ -608,7 +608,9 @@ class TreeFarm:
             sev_order = [("critical", "🔴 严重"), ("high", "🟠 高危"),
                          ("medium", "🟡 中危"), ("low", "🟢 低危")]
             for sev_key, sev_name in sev_order:
-                group = [i for i in issues if i["severity"] == sev_key]
+                # v4.9.4：测试代码的问题（scope=test）不混入核心段展示——
+                # 测试用例常故意构造脏数据（pickle.loads 等），混入严重段吓到小白
+                group = [i for i in issues if i["severity"] == sev_key and i.get("scope") != "test"]
                 if not group:
                     continue
                 lines.append(f"【{sev_name} · {len(group)}】")
@@ -618,6 +620,16 @@ class TreeFarm:
                     lines.append(f"      代码: {iss['code']}")
                 if len(group) > 25:
                     lines.append(f"  ... 还有 {len(group) - 25} 个")
+                lines.append("")
+            test_grp = [i for i in issues if i.get("scope") == "test"]
+            if test_grp:
+                lines.append("【🧪 测试代码里的问题（不参与评分）】")
+                for iss in test_grp[:25]:
+                    lines.append(f"  [{iss['type']}] {iss['file']}:{iss['line']}")
+                    lines.append(f"      {iss['desc']}")
+                    lines.append(f"      代码: {iss['code']}")
+                if len(test_grp) > 25:
+                    lines.append(f"  ... 还有 {len(test_grp) - 25} 个")
                 lines.append("")
             lines.append("【修复建议】")
             for s in result["suggestions"]:
@@ -645,7 +657,8 @@ class TreeFarm:
         else:
             sev_order = [("high", "🔴 高性能影响"), ("medium", "🟡 中性能影响"), ("low", "🟢 低性能影响")]
             for sev_key, sev_name in sev_order:
-                group = [i for i in issues if i["severity"] == sev_key]
+                # v4.9.4：测试代码的问题不混入核心段（测试用例常故意构造性能边际用例）
+                group = [i for i in issues if i["severity"] == sev_key and i.get("scope") != "test"]
                 if not group:
                     continue
                 lines.append(f"【{sev_name} · {len(group)}】")
@@ -655,6 +668,16 @@ class TreeFarm:
                     lines.append(f"      代码: {iss['code']}")
                 if len(group) > 25:
                     lines.append(f"  ... 还有 {len(group) - 25} 个")
+                lines.append("")
+            test_grp = [i for i in issues if i.get("scope") == "test"]
+            if test_grp:
+                lines.append("【🧪 测试代码里的问题（不参与评分）】")
+                for iss in test_grp[:25]:
+                    lines.append(f"  [{iss['type']}] {iss['file']}:{iss['line']}")
+                    lines.append(f"      {iss['desc']}")
+                    lines.append(f"      代码: {iss['code']}")
+                if len(test_grp) > 25:
+                    lines.append(f"  ... 还有 {len(test_grp) - 25} 个")
                 lines.append("")
             lines.append("【优化建议】")
             for s in result["suggestions"]:
@@ -682,7 +705,8 @@ class TreeFarm:
         else:
             sev_order = [("high", "🔴 高风险"), ("medium", "🟡 中风险"), ("low", "🟢 低风险")]
             for sev_key, sev_name in sev_order:
-                group = [i for i in issues if i["severity"] == sev_key]
+                # v4.9.4：测试代码的问题不混入核心段（测试用例故意构造竞态/脏数据）
+                group = [i for i in issues if i["severity"] == sev_key and i.get("scope") != "test"]
                 if not group:
                     continue
                 lines.append(f"【{sev_name} · {len(group)}】")
@@ -694,6 +718,16 @@ class TreeFarm:
                         lines.append(f"      🔧 修复: {iss['fix']}")
                 if len(group) > 25:
                     lines.append(f"  ... 还有 {len(group) - 25} 个")
+                lines.append("")
+            test_grp = [i for i in issues if i.get("scope") == "test"]
+            if test_grp:
+                lines.append("【🧪 测试代码里的问题（不参与评分）】")
+                for iss in test_grp[:25]:
+                    lines.append(f"  [{iss['type']}] {iss['file']}:{iss['line']}")
+                    lines.append(f"      {iss['desc']}")
+                    lines.append(f"      代码: {iss['code']}")
+                if len(test_grp) > 25:
+                    lines.append(f"  ... 还有 {len(test_grp) - 25} 个")
                 lines.append("")
             lines.append("【修复建议】")
             for s in result["suggestions"]:

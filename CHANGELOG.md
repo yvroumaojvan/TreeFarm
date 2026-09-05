@@ -5,6 +5,59 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.4] - 2026-09-05
+
+### 🐛 修复：tornado 金标准误报治理（10 大类误报全消，评分 9.7 → 41.7）
+
+**触发**：别的 AI 拿 v4.9.3 跑 BugsInPy tornado（116 文件，验证 SQL 治理效果）——暴露大规模
+误报把顶级开源项目打成 100/100 F 分、六维健康度安全/逻辑/性能/质量全 0.0，grader 决策支撑失效。
+
+**根因**：污点分析「函数参数全标污点」+ 子串/Popen 的 "open(" 子串/参数名雷同（url/next/name）
+等触发 + `%s` 格式化被当取模 + RLock 被当并发源 + 展示层测试代码混入核心段，多重叠加。
+
+**修复（analysis.py + core.py）**：
+
+- **污点来源分级**（总根源，set → dict）：`param`（函数参数，弱）< `concat`（拼接传播）< `user`
+  （request/input/argv 直接源）。危险 sink 只对强污点必报，纯 param 豁免——
+  `template.execute(add=add)`（文档示例）、`execute(schema)`（读静态 schema.sql）不再误报；
+  **param 参与跨行拼接（`sql = "SELECT…" + table`）保留必报**（v4.5 污点分析核心能力不丢）
+- **命令注入**：列表形态 `Popen([sys.executable] + argv)` 豁免（非 shell 拼接）
+- **路径遍历**：`\bopen` 词边界 + 排除 `def open()` 定义与 `.open(` 方法调用——
+  `Popen(...)` 的 "open(" 子串、`def open(self, *args)` 不再误伤
+- **CRLF 注入**：只认真用户输入源拼接头值；`set_cookie` 参数名 name、
+  `self.request.headers[...]` 自写（Basic 认证 b64 编码不含 \r\n）不再误报
+- **临时文件竞争**：删除 `/tmp/xxx` 字符串宽泛规则
+  （`define("root_directory", default="/tmp/s3")` 配置默认值不再误报），只认 `open(.../tmp/...)` 形态
+- **开放重定向**：删 `url\b`/`next\b` 参数名触发（`self.redirect(url)` 误报），改污点层强污点接管
+  （`target = request.args.get("next"); redirect(target)` 仍报）
+- **除零风险**：`"%s" % var` 字符串格式化 ≠ 取模除法（web.py `"%r" % value` 误报根源），真除法保留
+- **竞态条件**：threading.RLock/Lock 同步原语 ≠ 并发源（template.py 解析器不再误报）；
+  异步文件 + ThreadPoolExecutor = offload 阻塞任务标准模式（tornado ioloop.py 不再误报）；
+  `threading.Thread(` 真并发仍报（v4.7 降误报测试全含）
+- **展示层**：测试代码的问题打 `scope=test`，从「严重/高危」段移出，独立
+  「🧪 测试代码里的问题（不参与评分）」分组（security/logic/performance 三处展示全部生效）
+- **硬编码凭据**：`__TODO:_GENERATE_YOUR_OWN_...` 占位符豁免（框架 demo 提示用户替换，非真实密钥）
+
+### 📊 tornado 6.1 靶场实测（前后对比）
+
+| 指标 | v4.9.3 | v4.9.4 |
+|---|---|---|
+| --security 风险分 | 100/100 F | **0/100 A** |
+| 严重问题（核心代码） | 3（SQL×2 + 命令注入） | **0** |
+| 高危路径遍历误报 | 2（Popen / def open） | **0** |
+| --logic 竞态误报 | 5（ioloop×2 + template×3） | **0** |
+| API 契约真 bug（tornado Bug#1 同类） | ✅ 检出 | ✅ 保留检出 |
+| --grade 综合评分 | 9.7/100 F | **41.7/100** |
+| 安全健康度 | 0.0 | **100.0** |
+| 扫描耗时（89 文件 --security） | 16.2s | **9.3s** |
+
+### 🧪 测试
+
+- 新增 `tests/test_v494_fp_cleanup.py`（20 用例：SQL param 豁免/拼接保留、Popen 列表豁免、
+  def open 豁免、/tmp 配置豁免、url 参数名豁免、% 格式化豁免、RLock/异步线程池不报竞态、
+  scope=test 标识等），全部 tornado 靶场实测驱动
+- **386 个 unittest 全绿**（366 → 386，零依赖）
+
 ## [4.9.3] - 2026-09-05
 
 ### 🐛 修复：SQL 注入误报（参数化查询 / 纯静态 SQL 被污点分析误判）

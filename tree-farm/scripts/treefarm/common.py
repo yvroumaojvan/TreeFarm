@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.8.2"                # 工具版本（v4.8.2：--deep-full 默认输出 AI 思维链任务卡——宿主 agent 自己思考，零配置零 token；配 key 才自动跑 LLM）
+VERSION = "4.9.4"                # 工具版本（v4.9.4：tornado 金标准误报治理——污点分级 param/concat/user、Popen 列表豁免、def open 排除、CRLF/临时文件/重定向/除零/竞态误报全消 + 测试问题 scope=test 独立展示）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
