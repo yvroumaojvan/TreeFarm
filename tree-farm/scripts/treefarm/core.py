@@ -1130,6 +1130,388 @@ class TreeFarm:
                      "或 --grade 看综合评分/趋势")
         return "\n".join(lines)
 
+    # ===== v4.8.1 全面深度体检：每棵大树 4 条普通思维链分支 + 1 条独立弱信号分支 =====
+
+    def deep_scan_full(self, rounds: int = 2) -> str:
+        """全面深度体检（--deep-full / 全面深度体检 / 恐怖体检）——真·思维链版。
+
+        与省 token 版（--deep，静态规则引擎）根底不同：本版是 AI 推理引擎。
+        每棵大树派出 1 条完整思维链（至少 4 普通分支 + 1 独立弱信号分支），
+        每条分支【都携带基因记忆】（库中已确认的耦合关系 + 历史教训，防止重复犯错）
+        + 静态线索（规则引擎引路）+ 代码本体，逐分支真·推理排查全部 bug；
+        弱信号分支独立回收被忽略的底层线索，不并入普通分支。
+        rounds: 每棵大树思维链深挖轮数（默认 2；每轮携带上一轮发现继续挖，直到收敛）。
+        两版都借用基因库：大树识别 + 分支携带基因。无 LLM key 时降级静态分桶。"""
+        from .analysis import (detect_logic_issues, detect_performance_issues,
+                               detect_security_issues)
+        tree = self.scanned["tree"]
+        if not tree:
+            return "🌳 没有代码文件，无法体检。"
+        root = self.root
+        lines = ["=" * 56,
+                 "🌳 全面深度体检（大树 × 4普通分支 + 1弱信号分支）",
+                 "=" * 56]
+
+        # ===== 1. 参天大树识别（借用基因库：被引用度 + 基因数） =====
+        refs_of: Dict[str, List[str]] = {}
+        genes_of: Dict[str, int] = {}
+        for f in tree:
+            refs_of[f] = [r for r in self.bank.sources_referencing(f)]
+            genes_of[f] = len(self.bank.genes_of_source(f))
+        ranked = sorted(tree, key=lambda f: (-len(refs_of[f]), -genes_of[f]))
+        has_ref = [f for f in ranked if refs_of[f]]
+        core = has_ref if has_ref else ranked[:max(1, len(ranked) // 2)]
+        weeds = [f for f in ranked if f not in core]
+
+        # ===== 2. 静态检测全扫（引路线索） =====
+        sec = detect_security_issues(tree, root=root)
+        perf = detect_performance_issues(tree, root=root)
+        logic = detect_logic_issues(tree, root=root)
+        all_issues = sec["issues"] + perf["issues"] + logic["issues"]
+
+        # ===== 2.5 真·思维链模式（有 LLM key 时：每棵大树 4+1 分支带基因推理，多轮深挖） =====
+        from .config import LLMClient
+        llm = LLMClient(root)
+        if llm.available():
+            return self._deep_scan_llm(core, weeds, all_issues, llm, rounds)
+
+        # ===== 无 key 降级：静态分桶展示（4 普通分支 + 1 弱信号分支） =====
+        by_file: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for iss in all_issues:
+            p = iss["file"]
+            if not os.path.isabs(p):
+                p = os.path.join(root, p)
+            p = os.path.normpath(p)
+            bucket = by_file.setdefault(p, {"逻辑": [], "安全": [], "性能/资源": [],
+                                            "契约/接口": [], "弱信号": []})
+            t = iss.get("type", "")
+            sev = iss.get("severity", "low")
+            if t in ("API契约", "抽象方法未实现"):
+                bucket["契约/接口"].append(iss)
+            elif iss.get("src") == "security":
+                bucket["安全"].append(iss)
+            elif iss.get("src") == "performance":
+                bucket["性能/资源"].append(iss)
+            elif sev == "low":
+                bucket["弱信号"].append(iss)   # 低危 = 弱信号，独立，不混普通分支
+            else:
+                bucket["逻辑"].append(iss)
+
+        # ===== 3. 每棵大树 → 4 普通分支 + 1 弱信号分支 =====
+        branch_icons = {"逻辑": "🌿", "安全": "🛡️", "性能/资源": "⚡", "契约/接口": "🔗"}
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        for i, f in enumerate(core, 1):
+            rel = os.path.relpath(f, root)
+            n_ref = len(refs_of[f])
+            n_gene = genes_of[f]
+            hub = "  ← 枢纽/根节点" if n_ref >= max(1, len(core) // 2) else ""
+            lines.append("")
+            lines.append(f"├─ 🌳 大树 {i}/{len(core)}: {rel}")
+            lines.append(f"│    核心度: 被引用 {n_ref} 次 | 基因 {n_gene} 条{hub}")
+            fwd = []
+            for g in self.bank.genes_of_source(f):
+                t = g["target"]
+                fwd.append(os.path.relpath(t, root) if os.path.isfile(t) else t)
+            if fwd:
+                shown = ", ".join(fwd[:6])
+                lines.append(f"│    基因: {shown}{' ...' if len(fwd) > 6 else ''}")
+            bucket = by_file.get(f, {"逻辑": [], "安全": [], "性能/资源": [],
+                                     "契约/接口": [], "弱信号": []})
+            # 4 条普通分支
+            for bname in ("逻辑", "安全", "性能/资源", "契约/接口"):
+                blist = sorted(bucket[bname],
+                               key=lambda x: sev_order.get(x["severity"], 9))
+                icon = branch_icons[bname]
+                if blist:
+                    lines.append(f"│  {icon} 思维链分支[{bname}]（{len(blist)} 条线索）:")
+                    for iss in blist[:4]:
+                        lv = {"critical": "🔴严重", "high": "🟠高危",
+                              "medium": "🟡中", "low": "🟢低"}.get(iss["severity"], "?")
+                        lines.append(f"│      🧬[{lv}][{iss['type']}] 行{iss['line']}: "
+                                     f"{iss['desc'][:56]}")
+                    if len(blist) > 4:
+                        lines.append(f"│      ... 还有 {len(blist) - 4} 个")
+                else:
+                    lines.append(f"│  {icon} 思维链分支[{bname}]: 该分支未发现线索（跳过深挖）")
+            # 弱信号分支（独立）
+            wlist = sorted(bucket["弱信号"],
+                           key=lambda x: sev_order.get(x["severity"], 9))
+            lines.append(f"│  ⚡ 弱信号分支（独立，不并入普通分支）:")
+            if wlist:
+                for iss in wlist[:4]:
+                    lv = {"critical": "🔴严重", "high": "🟠高危",
+                          "medium": "🟡中", "low": "🟢低"}.get(iss["severity"], "?")
+                    lines.append(f"│      🧬[{lv}][{iss['type']}] 行{iss['line']}: "
+                                 f"{iss['desc'][:56]}")
+                if len(wlist) > 4:
+                    lines.append(f"│      ... 还有 {len(wlist) - 4} 个")
+            else:
+                lines.append("│      未回收到底层线索（可 --analyze 让 LLM 挖弱信号）")
+
+        # ===== 4. 跨树串联 + 跨树弱信号 =====
+        lines.append("")
+        lines.append("── 跨树串联 ──")
+        bridges = 0
+        for f in core[:12]:
+            rel = os.path.relpath(f, root)
+            fwd_core = [os.path.relpath(g["target"], root)
+                        for g in self.bank.genes_of_source(f)
+                        if g["target"] in core and g["target"] != f]
+            for t in fwd_core[:4]:
+                lines.append(f"  🔗 {rel} ⇢ {t}（改前者需排查后者）")
+                bridges += 1
+        if not bridges:
+            lines.append("  （核心树之间无直接引用，耦合度低，结构健康）")
+        # 跨树弱信号：同类型在多树出现（系统级缺陷嫌疑）归入弱信号维度
+        type_files: Dict[str, List[str]] = {}
+        for p, bucket in by_file.items():
+            for bname in ("逻辑", "安全", "性能/资源", "契约/接口"):
+                for iss in bucket[bname]:
+                    type_files.setdefault(iss["type"], []).append(
+                        os.path.relpath(p, root))
+        cross = {t: sorted(set(fs)) for t, fs in type_files.items()
+                 if len(set(fs)) >= 2}
+        if cross:
+            lines.append("")
+            lines.append("  ⚡ 跨树弱信号（同类型多树出现，可能是系统级缺陷，独立汇总）:")
+            for t, fs in list(cross.items())[:6]:
+                lines.append(f"    • {t}（{len(fs)} 棵: {', '.join(fs[:4])}）")
+
+        # ===== 5. 汇总 =====
+        total_issues = len(sec["issues"]) + len(perf["issues"]) + len(logic["issues"])
+        lines.append("")
+        lines.append(f"── 汇总: 大树 {len(core)} | 杂草 {len(weeds)} | "
+                     f"问题 {total_issues}（安全 {sec['total']} / "
+                     f"性能 {perf['total']} / 逻辑 {logic['total']}）")
+        worst = None
+        for f in core:
+            n = len(by_file.get(f, {}).get("逻辑", [])) + \
+                len(by_file.get(f, {}).get("安全", [])) + \
+                len(by_file.get(f, {}).get("性能/资源", [])) + \
+                len(by_file.get(f, {}).get("契约/接口", []))
+            if n and (worst is None or n > worst[1]):
+                worst = (os.path.relpath(f, root), n)
+        if worst:
+            lines.append(f"💡 优先修: {worst[0]}（普通分支线索最多 {worst[1]} 个）")
+        lines.append("")
+        lines.append("💡 结构: 每棵大树 4 普通分支（逻辑/安全/性能/契约）+ 1 弱信号分支，"
+                     "弱信号独立回收底层线索")
+        return "\n".join(lines)
+
+    # ===== 真·思维链推理（--deep-full 核心，LLM 驱动，多轮深挖） =====
+
+    def _alive_genes(self, source: str) -> Tuple[List[Dict[str, Any]], int]:
+        """思维链分支带基因前的「小虫子质检」：啃掉死基因/错基因，只留活基因。
+        死基因判定（防止带脏基因 → token 越耗越多 + 结果越来越差）：
+          1. 目标是项目内文件但已不存在（删除/移动 → 腐肉，直接吃掉落库，不再带）
+          2. 源文件 mtime 已变更（文件改过 → 基因可能过期，降级弱信号不污染普通分支）
+          3. 目标在垃圾箱里（该区域 AI 审核能力差，避免错基因污染普通分支）
+        注意：模块名（abc/flask 等标准库/外部依赖）不是文件路径，不做存在性检查。"""
+        alive: List[Dict[str, Any]] = []
+        stale: List[Dict[str, Any]] = []
+        dead = 0
+        trash_files = set(self.trash.trash())
+        try:
+            st = os.stat(source)
+            src_mtime = (st.st_mtime, st.st_size)
+        except OSError:
+            src_mtime = None
+        for g in self.bank.genes_of_source(source):
+            t = g.get("target", "")
+            if not t:
+                dead += 1
+                continue
+            # 模块名/符号名（非项目文件路径）→ 无法静态验证，视为活基因
+            if not (os.path.isabs(t) or "/" in t or "\\" in t):
+                alive.append(g)
+                continue
+            if not os.path.isfile(t):
+                dead += 1
+                self.bank.eat(source, t)   # 真死基因（项目文件已消失）：吃掉，不再广播
+                continue
+            if t in trash_files:
+                dead += 1
+                continue
+            # 小树过滤：源文件 mtime 变更 → 基因可能过期，降级弱信号
+            if src_mtime is not None:
+                try:
+                    row = self.bank.conn.execute(
+                        "SELECT mtime,size FROM files WHERE path=?", (source,)).fetchone()
+                    if row and (row["mtime"] != src_mtime[0] or row["size"] != src_mtime[1]):
+                        stale.append(g)
+                        continue
+                except Exception:
+                    pass
+            alive.append(g)
+        return alive, dead, stale
+
+    def _deep_scan_llm(self, core, weeds, all_issues, llm, rounds: int = 2) -> str:
+        """每棵大树派 1 条完整思维链（4 普通分支 + 1 独立弱信号分支），深挖 rounds 轮：
+        每条分支【携带基因记忆】（库中已确认耦合，防重复犯错）+ 静态线索 + 代码本体；
+        每轮把上一轮发现带回去继续挖，直到某轮全分支空发现（收敛）或到轮数上限。"""
+        root = self.root
+        hints_by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for iss in all_issues:
+            p = iss["file"]
+            if not os.path.isabs(p):
+                p = os.path.join(root, p)
+            hints_by_file.setdefault(os.path.normpath(p), []).append(iss)
+        lines = ["=" * 56,
+                 f"🌳 全面深度体检（AI 思维链 × 4+1 分支，携带基因记忆，深挖 {rounds} 轮）",
+                 "=" * 56]
+        found_total = 0
+        fail_count = 0
+        dead_total = 0
+        trash_files = set(self.trash.trash())
+        branch_cn = {"branch1": "数据/逻辑", "branch2": "安全",
+                     "branch3": "性能/资源", "branch4": "契约/接口",
+                     "weak_signal": "弱信号(独立)"}
+        icons = {"branch1": "🌿", "branch2": "🛡️", "branch3": "⚡",
+                 "branch4": "🔗", "weak_signal": "⚡"}
+        for i, f in enumerate(core, 1):
+            rel = os.path.relpath(f, root)
+            # 垃圾箱熔断：AI 审核能力差的区域，跳过普通分支，收尾专项修复
+            if f in trash_files:
+                lines.append("")
+                lines.append(f"├─ 🌳 大树 {i}/{len(core)}: {rel} ⚠️【垃圾箱区域】"
+                             "AI 审核能力差（候选验证多次失败），跳过普通思维链分支，"
+                             "收尾用 --fix 专项修复")
+                continue
+            # 小虫子质检：啃死基因，弱基因降级，只带活基因（防 token 越耗越多+结果变差）
+            genes, dead, stale = self._alive_genes(f)
+            dead_total += dead
+            known = [(g["target"], g["kind"]) for g in genes]
+            known_repr = ", ".join(f"{t}[{k}]" for t, k in known[:12]) or "(库中暂无)"
+            stale_repr = ", ".join(f"{g.get('target','?')}[{g.get('kind','?')}]"
+                                   for g in stale[:6]) or "(无)"
+            hints = hints_by_file.get(f, [])
+            hints_repr = "; ".join(f"{h['type']}:{h['line']}" for h in hints[:8]) or "(无)"
+            code = read_text(f)[:LLM_CODE_CHARS]
+            lines.append("")
+            lines.append(f"├─ 🌳 大树 {i}/{len(core)}: {rel}"
+                         f"（活基因 {len(known)} 条 | 虫子啃掉 {dead} 条死基因"
+                         f" | 弱基因 {len(stale)} 条 | 静态线索 {len(hints)} 条）")
+            prev_findings = ""
+            tree_found = 0
+            for r in range(1, rounds + 1):
+                # 检查点同步：新一轮重新拉活基因（上一轮验证入库的新基因带上）
+                if r > 1:
+                    genes2, dead2, stale2 = self._alive_genes(f)
+                    dead_total += dead2
+                    known2 = [(g["target"], g["kind"]) for g in genes2]
+                    if known2:
+                        known_repr = ", ".join(
+                            f"{t}[{k}]" for t, k in known2[:12])
+                prompt = self._build_chain_prompt(rel, known_repr, hints_repr,
+                                                  code, prev_findings, r,
+                                                  stale_repr)
+                try:
+                    raw = llm.chat([{"role": "user", "content": prompt}])
+                    data = json.loads(raw)
+                    if not isinstance(data, dict):
+                        raise ValueError("LLM 返回不是对象")
+                except Exception as e:
+                    fail_count += 1
+                    lines.append(f"│  ✖ 第{r}轮思维链调用失败: {str(e)[:60]}（跳过大树）")
+                    break
+                round_found = 0
+                round_summary = []
+                for bkey in ("branch1", "branch2", "branch3", "branch4",
+                             "weak_signal"):
+                    items = data.get(bkey) or []
+                    if not items:
+                        if r == 1:
+                            lines.append(f"│  {icons[bkey]} 分支[{branch_cn[bkey]}]: "
+                                         f"未发现（排查完毕）")
+                        continue
+                    if r == 1:
+                        lines.append(f"│  {icons[bkey]} 分支[{branch_cn[bkey]}] "
+                                     f"发现 {len(items)} 个:")
+                    for it in items[:5]:
+                        t = it.get("type", "未知")
+                        ln = it.get("line", "?")
+                        d = it.get("desc", "")[:52]
+                        s = it.get("severity", "low")
+                        lv = {"critical": "🔴严重", "high": "🟠高危",
+                              "medium": "🟡中", "low": "🟢低"}.get(s, s)
+                        if r == 1:
+                            lines.append(f"│      🧬[{lv}][{t}] 行{ln}: {d}")
+                        round_found += 1
+                        found_total += 1
+                        round_summary.append(f"{branch_cn[bkey]}:{t}@{ln}")
+                        # ===== 正反馈闭环：涉及外部模块/符号的耦合发现 → 小虫子验证入库 =====
+                        rel_target = it.get("related")
+                        if rel_target and isinstance(rel_target, str):
+                            res = self.bird(f, rel_target, is_weak=True)
+                            st = res.get("status", "?")
+                            if st == "verified_true":
+                                lines.append(f"│      🐦 可疑耦合 {rel_target} → "
+                                             f"小虫子验证为真 → 基因入库 ✅")
+                            elif st == "eaten_false":
+                                lines.append(f"│      🐛 可疑耦合 {rel_target} → "
+                                             f"小虫子验证为假 → 基因被吃掉")
+                            elif st == "weak_pending":
+                                lines.append(f"│      🐦 弱耦合 {rel_target} 待确认"
+                                             f"（还需 {res.get('confirms', 0)} 个独立分支）")
+                tree_found += round_found
+                if round_found == 0:
+                    if r > 1:
+                        lines.append(f"│  ↻ 第{r}轮无新发现 → 收敛，停止深挖")
+                    break
+                prev_findings = "上一轮已发现: " + "; ".join(round_summary[:12])
+        lines.append("")
+        lines.append(f"── 汇总: 思维链排查大树 {len(core)} 棵（每棵深挖至多 {rounds} 轮）| "
+                     f"AI 发现 {found_total} 个候选 | 虫子啃掉 {dead_total} 条死基因"
+                     f" | 静态规则引路 {len(all_issues)} 条"
+                     + (f" | 调用失败 {fail_count} 棵" if fail_count else ""))
+        if trash_files:
+            lines.append(f"⚠️ 垃圾箱 {len(trash_files)} 个文件未清空 = 任务未完成，"
+                         f"收尾跑 --fix 专项修复")
+        lines.append("")
+        lines.append("💡 结构: 每棵大树 4 普通分支（逻辑/安全/性能/契约）各自推理一遍"
+                     "+ 1 条独立弱信号分支回收被忽略角落；"
+                     "分支只带活基因（小虫子啃死基因/小树过滤），"
+                     "发现的新耦合走验证入库正反馈；多轮深挖直到收敛")
+        lines.append("💡 下一步: 候选确认后跑 --grade 看综合评分/趋势，"
+                     "或 --fix 走修复协议")
+        return "\n".join(lines)
+
+    def _build_chain_prompt(self, rel: str, known: str, hints: str, code: str,
+                            prev_findings: str = "", round_no: int = 1,
+                            stale_genes: str = "") -> str:
+        head = (f"第 {round_no} 轮深挖" if round_no > 1 else "首轮深挖")
+        extra = ""
+        if prev_findings:
+            extra = ("\n【上一轮发现】" + prev_findings +
+                     "（请不要重复报已发现的；继续往更深层挖，"
+                     "尤其是弱信号分支指向的方向）\n")
+        weak = ""
+        if stale_genes and stale_genes != "(无)":
+            weak = ("\n【待重验弱基因】（源文件已变更，基因可能过期，请弱信号分支重点验证）: "
+                    + stale_genes + "\n")
+        return (
+            f"你是树场机制的「思维链分析官」。正在分析大树（核心文件）: {rel}。{head}\n\n"
+            "【基因记忆】库中已确认的耦合/依赖关系（所有分支必须携带、以库的视角判断，"
+            "防止重复犯错）:\n" + known + "\n\n"
+            "【静态线索】规则引擎先扫出的可疑点（思维链的引路点，需进一步确认或深挖）:\n"
+            + hints + "\n" + weak + extra +
+            "请伸出 5 条分支逐一深挖（每条分支必须携带基因记忆分析代码）:\n"
+            "- branch1 数据/逻辑错误: 条件判断/边界/变量/类型/异常处理\n"
+            "- branch2 安全漏洞: 注入/XSS/路径/认证/硬编码/反序列化\n"
+            "- branch3 性能/资源: 算法复杂度/资源泄漏/IO/并发/缓存\n"
+            "- branch4 契约/接口: 委托对象一致性/抽象方法/返回值类型/API 兼容\n"
+            "- weak_signal 弱信号(独立，不并入普通分支): 只回收被忽略的角落——"
+            "低危模式/异常路径/跨模块约定/静态线索指向但未确认的深层问题\n\n"
+            "只报有代码证据的 bug，没发现的返回空数组。"
+            "若某发现涉及【外部模块/符号/对象的耦合】，必须带 related 字段"
+            "（小虫子会验证它是否真实，防止错误耦合污染基因库）。"
+            "输出 JSON（严格格式）:\n"
+            '{"branch1":[{"type":"...","line":行号,"desc":"...","severity":"high|medium|low",'
+            '"related":"外部符号(可选)"}],"branch2":[...],"branch3":[...],'
+            '"branch4":[...],"weak_signal":[...]}\n\n'
+            "=== 代码开始 ===\n" + code + "\n=== 代码结束 ==="
+        )
+
     def grade(self, spec_text: Optional[str] = None) -> str:
         """Grader 综合评分（v4.7，--grade）：六维健康度 → 综合分 + 等级 + 改进方向。
         支持 --spec 上下文（功能画像参与判断）与历史趋势（对比上次评分）。"""

@@ -2102,6 +2102,82 @@ class _LogicVisitor(ast.NodeVisitor):
                       f"建议用 asyncio.wrap_future / 包装成 tornado Future")
         self.generic_visit(node)
 
+    # ---- v4.8：跨实例缓存用普通 dict 且无清理（tornado#6 型：弱引用缺失 → 内存泄漏） ----
+    def _check_weakref_cache(self, tree):
+        """文件级检查：类级「缓存 dict」（{} 或 dict() 初始化）有写入但全文件无清理点。
+        对象生命周期由外部持有时（如事件循环），已关闭实例永久驻留 → 泄漏。
+        建议 weakref.WeakKeyDictionary 或显式清理。"""
+        cache_attrs: Set[str] = set()          # 类属性名（_cache 或 Class._cache）
+        cache_lines: Dict[str, int] = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for stmt in node.body:
+                targets = []
+                if isinstance(stmt, ast.Assign):
+                    targets = stmt.targets
+                    value = stmt.value
+                elif isinstance(stmt, ast.AnnAssign) and stmt.target is not None:
+                    targets = [stmt.target]
+                    value = stmt.value
+                else:
+                    continue  # FunctionDef/Expr 等非赋值语句跳过
+                is_cache_init = (isinstance(value, ast.Dict)
+                                 or (isinstance(value, ast.Call)
+                                     and isinstance(value.func, ast.Name)
+                                     and value.func.id == "dict"))
+                if not is_cache_init:
+                    continue
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        cache_attrs.add(t.id)
+                        cache_lines.setdefault(t.id, node.lineno)
+                    elif isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
+                        cache_attrs.add(ast.unparse(t))
+                        cache_lines.setdefault(ast.unparse(t), node.lineno)
+        if not cache_attrs:
+            return
+        writes: Set[str] = set()
+        cleaned: Set[str] = set()
+        for node in ast.walk(tree):
+            # 写入：Cache[key] = ...（Cache 为 ClassName.attr / self.attr / 类属性名）
+            if (isinstance(node, ast.Assign) and node.targets
+                    and isinstance(node.targets[0], ast.Subscript)):
+                sv = node.targets[0].value
+                if isinstance(sv, ast.Attribute):
+                    key = sv.attr
+                    if key in cache_attrs:
+                        writes.add(key)
+                    full = ast.unparse(sv)
+                    if full in cache_attrs:
+                        writes.add(full)
+                elif isinstance(sv, ast.Name) and sv.id in cache_attrs:
+                    writes.add(sv.id)
+            # 清理：del Cache[...] / Cache.pop / Cache.clear
+            if (isinstance(node, ast.Delete) and node.targets
+                    and isinstance(node.targets[0], ast.Subscript)):
+                sv = node.targets[0].value
+                if isinstance(sv, ast.Attribute):
+                    key = sv.attr
+                    if key in cache_attrs:
+                        cleaned.add(key)
+                    full = ast.unparse(sv)
+                    if full in cache_attrs:
+                        cleaned.add(full)
+                elif isinstance(sv, ast.Name) and sv.id in cache_attrs:
+                    cleaned.add(sv.id)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("pop", "clear", "popitem")
+                    and isinstance(node.func.value, ast.Attribute)):
+                if node.func.value.attr in cache_attrs:
+                    cleaned.add(node.func.value.attr)
+        for name in sorted(cache_attrs - cleaned):
+            if name in writes:
+                self._add(cache_lines.get(name, 1), "资源泄漏", "low",
+                          f"跨实例缓存 {name} 用普通 dict 且全文件无清理点（无 del/pop/clear）："
+                          f"对象生命周期由外部持有时（如事件循环），已关闭实例永久驻留 → 内存泄漏，"
+                          f"建议 weakref.WeakKeyDictionary 或 close 时显式清理")
+
     # ---- 竞态条件：仅当文件真实使用线程 + 共享属性自增无锁 ----
     def _has_lock_in_scope(self, node):
         scope = self._enclosing_func(node)
@@ -2474,6 +2550,7 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
         vis = _LogicVisitor(lines, rel, has_threads)
         vis.visit(tree)
         vis._check_race(tree)
+        vis._check_weakref_cache(tree)
         issues.extend(vis.issues)
         # v4.7 新增：API 契约一致性 + 抽象方法完整性
         cv = _ContractVisitor(lines, rel)

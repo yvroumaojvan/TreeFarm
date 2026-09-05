@@ -297,6 +297,15 @@ def _dispatch(farm: TreeFarm, root: str, args: List[str]) -> None:
     # ===== v4.7 grader 化：功能画像 / 综合评分 / 趋势 =====
     elif cmd in ("--deep", "深度体检", "大树体检", "全自动流水线", "参天大树", "大树"):
         print(farm.deep_scan())
+    elif cmd in ("--deep-full", "全面深度体检", "恐怖体检", "思维链体检", "深度体检全面"):
+        # 支持 --deep-full <轮数>：每棵大树思维链深挖 N 轮（默认 2 轮，带上一轮发现继续挖）
+        rounds = 2
+        if len(rest) >= 2:
+            try:
+                rounds = max(1, min(5, int(rest[1])))
+            except ValueError:
+                rounds = 2
+        print(farm.deep_scan_full(rounds=rounds))
     elif cmd in ("--spec", "功能描述", "项目画像", "画像") and len(rest) >= 2:
         farm.set_spec(rest[1])
         print(farm.spec())

@@ -8,12 +8,15 @@
 
 覆盖：
 - deep_scan 全自动深度体检：大树识别 / 每树思维链 / 跨树串联 / 汇总
+- deep_scan_full：无 LLM key 时降级静态分桶可跑；分支携带基因记忆
 - v4.8 新静态规则：get 后 del 同一字典 key（tornado#3 型）、executor.submit 直返（tornado#7 型）
+- v4.8.1 小虫子质检 _alive_genes：模块名不误杀、目标文件消失=死基因吃掉
 """
 import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from treefarm.analysis import detect_logic_issues
 from treefarm.core import TreeFarm
@@ -74,6 +77,69 @@ class TestDeepScan(unittest.TestCase):
         farm.plant()
         out = farm.deep_scan()
         self.assertIn("── 汇总", out)
+
+
+class TestDeepScanFullFallback(unittest.TestCase):
+    """deep_scan_full 无 LLM key 时降级静态分桶可跑（v4.8.1）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        _write(os.path.join(self.tmp, "app.py"),
+               "def helper():\n"
+               "    return 1\n"
+               "def main():\n"
+               "    x = {}\n"
+               "    del x[1]\n"
+               "    return helper()\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fallback_without_llm(self):
+        farm = TreeFarm(self.tmp)
+        farm.plant()
+        with mock.patch("treefarm.config.LLMClient.available", return_value=False):
+            out = farm.deep_scan_full(rounds=1)
+        self.assertIn("全面深度体检", out)
+        self.assertIn("大树", out)
+
+
+class TestAliveGenes(unittest.TestCase):
+    """v4.8.1 小虫子质检 _alive_genes：模块名不误杀、死基因吃掉。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        _write(os.path.join(self.tmp, "lib.py"),
+               "def util():\n    return 1\n")
+        _write(os.path.join(self.tmp, "app.py"),
+               "import os\n"
+               "import lib\n"
+               "def main():\n"
+               "    return lib.util()\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_module_name_not_killed(self):
+        """import os 的基因 target 是模块名（非文件路径），不能被当死基因吃掉"""
+        farm = TreeFarm(self.tmp)
+        farm.plant()
+        alive, dead, stale = farm._alive_genes(os.path.join(self.tmp, "app.py"))
+        self.assertEqual(dead, 0)
+        # lib.py 的项目内文件基因应该保留（文件存在）
+        self.assertTrue(any("lib.py" in g.get("target", "") for g in alive))
+
+    def test_deleted_target_eaten(self):
+        """项目内目标文件被删 → 死基因被吃掉（腐肉检测）"""
+        farm = TreeFarm(self.tmp)
+        farm.plant()
+        lib = os.path.join(self.tmp, "lib.py")
+        os.remove(lib)
+        alive, dead, stale = farm._alive_genes(os.path.join(self.tmp, "app.py"))
+        self.assertGreaterEqual(dead, 1)
+        # 吃落后基因库里不再有指向 lib 的基因
+        genes = farm.bank.genes_of_source(os.path.join(self.tmp, "app.py"))
+        self.assertFalse(any(lib in g.get("target", "") for g in genes))
 
 
 class TestV48StaticRules(unittest.TestCase):
