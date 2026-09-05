@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.8.1"                # 工具版本（v4.8：--deep 全自动深度体检；v4.8.1：--deep-full 真思维链 4+1 分支 + 机制全接通：小虫子质检/垃圾箱/正反馈闭环）
+VERSION = "4.8.2"                # 工具版本（v4.8.2：--deep-full 默认输出 AI 思维链任务卡——宿主 agent 自己思考，零配置零 token；配 key 才自动跑 LLM）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

@@ -102,6 +102,9 @@ class TestDeepScanFullFallback(unittest.TestCase):
             out = farm.deep_scan_full(rounds=1)
         self.assertIn("全面深度体检", out)
         self.assertIn("大树", out)
+        # v4.8.2：无 key 默认输出「AI 思维链任务卡」（宿主 agent 自己思考）
+        self.assertIn("思维链任务卡", out)
+        self.assertIn("基因记忆", out)
 
 
 class TestAliveGenes(unittest.TestCase):
