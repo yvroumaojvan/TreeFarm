@@ -12,12 +12,29 @@ from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from .common import _gram_hashes, read_text
-from .parser import (_func_body_end, _go_defs, _java_defs, _js_defs, _rust_defs,
-                     _count_complexity, _lineno_of,
-                     _strip_go_noise, _strip_java_noise,
+from .parser import (_count_complexity, _func_body_end, _c_defs, _go_defs, _java_defs,
+                     _js_defs, _lineno_of, _rust_defs,
+                     _strip_c_noise, _strip_go_noise, _strip_java_noise,
                      _strip_js_noise, _strip_rust_noise,
-                     extract_go_call_graph, extract_java_call_graph,
+                     extract_c_call_graph, extract_go_call_graph,
+                     extract_java_call_graph,
                      extract_js_call_graph, extract_rust_call_graph)
+
+
+def _is_c_static_func(fpath: str, lineno: int) -> bool:
+    """v4.9.8：判断 C/C++ 函数是否 static（文件私有）。
+    读该行看是否以 static/extern 修饰开头（排除 static 变量声明形态——由上方
+    调用正则已过滤，这里只查「行首 static + 类型 + 名字 + (」形态）。"""
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f, 1):
+                if i == lineno:
+                    return bool(re.match(
+                        r"\s*static\s+(?:(?:inline|const|volatile|constexpr)\s+)*",
+                        line))
+    except Exception:
+        return False
+    return False
 
 
 def detect_dead_code(tree_files: List[str]) -> Dict[str, Any]:
@@ -105,6 +122,26 @@ def detect_dead_code(tree_files: List[str]) -> Dict[str, Any]:
             called.update(re.findall(r"\bimpl\s+([A-Za-z_]\w*)\s+for\b", clean))   # impl Trait for X → trait 算使用
             called.update(re.findall(r":[^;=\n]*?\b([A-Z][A-Za-z_]\w*)\b", clean))  # let x: Type / fn f(p: Type) / 泛型约束
             inherited.update(rust_inherits)
+        elif ext in (".c", ".h", ".cpp"):
+            clean = _strip_c_noise(text)
+            for name, _, ln, kind in _c_defs(clean):
+                target = all_classes if kind == "class" else all_functions
+                target.setdefault(name, []).append((f, ln))
+            c_calls, c_inherits = extract_c_call_graph(f)
+            called.update(c.split(".")[-1] for c in c_calls)
+            # C/C++ 类型使用（降低死类误报）：
+            # 结构体/类变量声明 T var; / new T( / &T{ / T *p; / sizeof(T) / 模板实参
+            called.update(re.findall(r"\bnew\s+([A-Za-z_]\w*)\s*\(", clean))
+            called.update(re.findall(r"\bstruct\s+([A-Za-z_]\w*)\s+\w+\s*[;=]", clean))
+            called.update(re.findall(r"sizeof\s*\(\s*([A-Za-z_]\w*)", clean))
+            # v4.9.8：C++ 类实例化/变量声明形态——Worker w; / Foo *p / Bar &r / Baz obj( /
+            #   返回类型 Foo fn( 也算类被引用（防构造/析构/类误报死代码）
+            called.update(re.findall(r"\b([A-Z][A-Za-z_]\w*)\s+[a-z_]\w*\s*[;=({*&]", clean))
+            called.update(re.findall(r"\b([A-Z][A-Za-z_]\w*)\s*[*&]\s+[a-z_]\w*\s*[;=,(]", clean))
+            called.update(re.findall(r"\b([A-Z][A-Za-z_]\w*)\s*<\s*[^;=>]+>\s+[a-z_]\w*\s*[;=({*&]", clean))
+            inherited.update(c_inherits)
+            # v4.9.8：类被使用时其~析构函数也算被使用（~Worker 免报死代码）
+            called.update("~" + c for c in list(called) if c and not c.startswith("~"))
 
     # v4.0 改进：降低误报率
     # 1. 收集所有导出符号（__all__）
@@ -178,8 +215,11 @@ def detect_dead_code(tree_files: List[str]) -> Dict[str, Any]:
             # v4.0：计算置信度
             confidence = "high"
             reasons = []
-            # 测试文件中的函数置信度低（可能被测试框架调用）
-            if _is_test_file(fpath):
+            # v4.9.8：C/C++ static 函数 = 文件私有，无人调用即确定死代码
+            if fpath.endswith((".c", ".cpp", ".h")) and _is_c_static_func(fpath, lineno):
+                confidence = "high"
+                reasons.append("C/C++ static 函数，仅当前文件可见，无调用即死代码")
+            elif _is_test_file(fpath):
                 confidence = "low"
                 reasons.append("测试文件，可能被测试框架调用")
             # 公共API置信度低（可能被外部模块调用）
@@ -423,6 +463,8 @@ def calculate_complexity_any(path: str) -> Optional[Dict[str, Any]]:
         lang, defs_fn, strip_fn = "go", _go_defs, _strip_go_noise
     elif ext == ".rs":
         lang, defs_fn, strip_fn = "rust", _rust_defs, _strip_rust_noise
+    elif ext in (".c", ".h", ".cpp"):
+        lang, defs_fn, strip_fn = "cpp", _c_defs, _strip_c_noise
     else:
         return None
     text = read_text(path)
@@ -1280,12 +1322,106 @@ def _scan_java_file_level(lines, issues, severity_count, rel):
 # 安全漏洞检测模块 (v4.0 新增)
 # ============================================================
 
+def _scan_c_security(lines, issues, severity_count, rel):
+    """C/C++ 启发式安全规则（v4.9.8）：
+    1) system()/popen() 命令注入：参数含动态成分（变量/拼接）→ 报；纯字面量不报
+    2) gets() 永远危险：无边界读取
+    3) strcpy/strcat 第二参动态：缓冲区溢出风险（建议 strncpy/strncat）
+    4) sprintf 无边界格式化：建议 snprintf（含动态格式 %s 时高危，纯字面量提示）
+    5) scanf/fscanf "%s" 无边界读取
+    6) 硬编码密钥（char *api_key = "..." 形态）
+    """
+    for i, line in enumerate(lines, 1):
+        if len(line) > 32768:
+            line = line[:32768]  # v4.9.2 行长护栏防 ReDoS
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("//", "*", "/*", "#")):
+            continue
+
+        # 0) 硬编码密钥/口令
+        if re.search(r'''\b(?:api_key|apikey|api_token|access_key|secret_key|secret_token|password|passwd)\b\s*=\s*["'][^"']{8,}["']''', line):
+            issues.append({"file": rel, "line": i, "type": "硬编码凭据",
+                           "severity": "high",
+                           "desc": "硬编码密钥/口令：泄露即被利用，建议改为环境变量/配置注入",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1
+
+        # 1) system()/popen() 命令注入
+        for m in re.finditer(r'''(?<![A-Za-z_])(?:system|popen)\s*\(([^;]*)\)''', line):
+            args = m.group(1)
+            rest = re.sub(r'"[^"]*"', '', args)      # 去掉字符串字面量
+            if re.search(r'[a-zA-Z_]\w*|\+', rest):   # 剩变量/拼接 → 动态
+                issues.append({"file": rel, "line": i, "type": "命令注入",
+                               "severity": "critical",
+                               "desc": "命令注入：system()/popen() 参数含动态成分"
+                                       "（变量/拼接）。若来自用户输入，可执行任意命令",
+                               "code": stripped[:100]})
+                severity_count["critical"] += 1
+                break
+
+        # 2) gets() 永远危险
+        if re.search(r'''(?<![A-Za-z_])\bgets\s*\(''', line):
+            issues.append({"file": rel, "line": i, "type": "缓冲区溢出",
+                           "severity": "critical",
+                           "desc": "缓冲区溢出：gets() 无边界读取已被 C11 移除，"
+                                   "改用 fgets(buf, size, stdin)",
+                           "code": stripped[:100]})
+            severity_count["critical"] += 1
+
+        # 3) strcpy/strcat 动态第二参 → 溢出风险
+        # v4.9.8 第7轮：只查第二参（源串）动态性——第一参 dst 永远是目标变量，
+        # 查整行会把 strcpy(dst, "const") 误报（测试实锤驱动）
+        for m in re.finditer(r'''(?<![A-Za-z_])\b(?:strcpy|strcat)\s*\(([^;]*)\)''', line):
+            args = m.group(1)
+            parts = args.split(",")
+            second = parts[1] if len(parts) > 1 else ""
+            rest = re.sub(r'"[^"]*"', '', second)
+            if rest.strip():
+                issues.append({"file": rel, "line": i, "type": "缓冲区溢出",
+                               "severity": "high",
+                               "desc": "缓冲区溢出风险：strcpy/strcat 不检查目标"
+                                       "缓冲区大小，建议改用 strncpy/strncat "
+                                       "(dst, src, sizeof(dst)-1)",
+                               "code": stripped[:100]})
+                severity_count["high"] += 1
+                break
+
+        # 4) sprintf 无边界格式化（建议 snprintf）
+        # v4.9.8 第7轮：只查第二参（格式串）——纯静态无格式符 sprintf(buf,"hello")
+        # 不报；fmt 动态或有 %格式符（%d/%s...）→ 报。%格式符在字面量内也算
+        # （"ls -la %s" 是真实溢出源，测试实锤驱动）
+        for m in re.finditer(r'''(?<![A-Za-z_])\bsprintf\s*\(([^;]*)\)''', line):
+            args = m.group(1)
+            parts = args.split(",")
+            second = parts[1] if len(parts) > 1 else ""
+            rest = re.sub(r'"[^"]*"', '', second)
+            has_fmt = re.search(r'%[0-9.]*[duxXcfs]', second)   # 格式符（字面量内也算）
+            if has_fmt or re.search(r'[a-zA-Z_]\w*|\+', rest):
+                issues.append({"file": rel, "line": i, "type": "缓冲区溢出",
+                               "severity": "medium",
+                               "desc": "sprintf 不检查目标缓冲区大小，可能溢出；"
+                                       "建议改用 snprintf(buf, sizeof(buf), fmt, ...)",
+                               "code": stripped[:100]})
+                severity_count["medium"] += 1
+                break
+
+        # 5) scanf/fscanf %s 无边界读取
+        if re.search(r'''(?<![A-Za-z_])\b(?:scanf|fscanf)\s*\([^;]*["']\s*%s\s*["']''', line):
+            issues.append({"file": rel, "line": i, "type": "缓冲区溢出",
+                           "severity": "high",
+                           "desc": "无边界读取：%s 不限制长度，可能溢出；"
+                                   "建议 %<width>s 或 fgets",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1
+
+
 def detect_security_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
     """检测安全漏洞：SQL注入、XSS、命令注入、路径遍历、硬编码密码、不安全反序列化、弱哈希、
     SSRF、JWT、XXE、开放重定向、认证绕过"""
     # v4.8.3：加入 .java（走 _scan_java_security 启发式规则，见下）
+    # v4.9.8：加入 .c/.h/.cpp（走 _scan_c_security 启发式规则）
     _SECURITY_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".vue",
-                      ".java"}
+                      ".java", ".c", ".h", ".cpp"}
 
     issues = []
     severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1315,6 +1451,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             _scan_java_security(lines, issues, severity_count, rel)
             # v4.9.0：文件级弱信号（黑名单 contains 反模式）
             _scan_java_file_level(lines, issues, severity_count, rel)
+            continue
+
+        # v4.9.8：C/C++ 文件走专用启发式安全规则（system/popen/gets/strcpy/sprintf）
+        if ext in (".c", ".h", ".cpp"):
+            _scan_c_security(lines, issues, severity_count, rel)
             continue
 
         # v4.5 新增：污点变量收集（轻量级跨行数据流跟踪）

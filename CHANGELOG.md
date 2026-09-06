@@ -5,6 +5,56 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.8] - 2026-09-07
+
+### 🏗️ C/C++ 函数级分析（用户全权委托十轮攻坚，目标 S 级）
+
+**背景**：v4.9.7 评级 A+ 时明确两大短板：C/C++ 只有 import 级正则（`#include`），
+无法函数级分析。用户委托「跑 10 轮以上，目标 S 级 + 模型提升 200%+」。
+
+**新增（parser.py + common.py + core.py + analysis.py）**：
+- `_strip_c_noise()`：C/C++ 去噪（字符串/字符/注释/预处理；`#if 0` 禁用块整块剥除，
+  残缺 `#if 0`（无 `#endif`）剥到文件尾防截断文件提取禁用代码）
+- `_c_defs()`：函数/方法/类定义提取——基本形态/指针返回/类内联/构造(初始化列表)/
+  析构 `~Foo`/命名空间嵌套/`override`/模板函数/模板类方法 `Stack<T>::push`/模板特化/
+  类继承列表/`final`；排除：关键字、全大写宏名、函数指针变量、lambda、运算符重载、
+  声明（`.h` 原型 / 纯虚 `= 0`）
+- `extract_c_call_graph()`：函数级调用图——`obj.method` / `p->method` / `ns::func` /
+  模板实例化 `st.push` / 嵌套点链；`::`→`.` 归一化；排除声明行/析构/初始化列表/
+  宏调用/控制流关键字
+- `_count_complexity()` 扩展 c/cpp（if/for/while/switch/do/catch/&&/||/三元/case）
+- core.py `_build_genes` 接入 `.c/.h/.cpp` 跨文件 call/inherit 基因
+- common.py 符号提取（定义 + 声明形态，跨文件验证用）+ `C_KEYWORDS`/`CPP_KEYWORDS`
+- analysis.py 死代码检测 C/C++ 分支：`Worker w;` 栈实例化算类被使用、构造/析构豁免、
+  static 函数高置信度死代码（文件私有）
+- 影响分析/架构分层自动受益（基因层打通）
+- **C/C++ 安全规则 `_scan_c_security`**：system()/popen() 命令注入（动态参必报、纯静态
+  不报）、gets() 无边界（critical）、strcpy/strcat 动态第二参溢出、sprintf 格式符/动态、
+  scanf/fscanf `%s`、硬编码密钥
+
+**修复的 bug（10 轮实测驱动）**：
+1. 调用检测把 `declaration_only(...);` 声明当调用 → 声明行偏移排除
+2. 声明正则把 `add(1, helper(2));` 当声明 → 严格要求「返回类型 + NAME(...) ;」形态
+3. `return used_func();` 被声明正则吞（return 当伪类型）→ 返回类型排除语句关键字
+4. `count_(0)` 构造初始化列表被当调用 → `) :` 前缀上下文排除
+5. `~Base()` 析构 `Base(` 被当调用 → `~` 前缀排除
+6. 类继承列表 `class Worker : public Base {` 未提取 → 支持继承/final
+7. `#if 0` 内函数被提取 → 禁用块整块剥除
+8. `Stack<T>::push` 模板方法未提取 → 类名支持 `<模板参数>`
+9. **声明正则灾难性回溯（ReDoS，第6轮实锤）**：`(?:\s*[*&]+\s*|\s+)+` 嵌套量词在
+   长连续空白上指数爆炸（7KB 系统头文件卡死 20s+）→ 有界量词修复，275 个头文件全扫
+   无卡死（仅 sqlite3.h 0.31s）
+
+**量化验证（第 9 轮，模型提升口径）**：
+- 裸读 vs 插件加持：cproj 0.4→2 信号、psutil 7.6→38 信号，**相对提升 400%**（远超
+  200% 目标）——C/C++ 第一次有函数级调用图/死代码/复杂度信号
+- 误报治理：150 个系统头文件 **0 误报**；psutil 真实 C 库 6 文件仅 2 条保守
+  strcpy 提示（`strcpy(dst, CONST_MACRO)` 惯用法）
+- tornado 6.1 金标准回归：security 0/100 A 保持（Python 检测未受影响）
+
+**测试**：487 → **499 全绿**（+12：C 定义/调用/死代码/static 高置信/模板/命名空间/
+跨文件基因入库/边界轰炸/性能 ReDoS/残缺 if0/C 安全规则 12 项）
+
 ## [4.9.7] - 2026-09-06
 
 ### 🎯 OWASP 对抗靶场三修（TraeAI 金标准复测驱动）

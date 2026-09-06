@@ -23,7 +23,8 @@ from .common import (BRIEF_MAX_SYMBOLS, CONVERGE_LIMIT, LLM_CODE_CHARS,
                      _cache, _gram_hashes, file_fingerprint, read_text,
                      rel_module, scan, scan_changes)
 from .config import LLMClient, load_config
-from .parser import (extract_call_graph, extract_genes, extract_go_call_graph,
+from .parser import (extract_call_graph, extract_c_call_graph, extract_genes,
+                     extract_go_call_graph,
                      extract_java_call_graph, extract_js_call_graph,
                      extract_rust_call_graph, extract_symbols, verify_candidate)
 from .storage import GeneBank, Session, SmallTree, TrashBin, WeedIndex
@@ -266,6 +267,12 @@ class TreeFarm:
             for name in rust_calls:
                 n_deep += self._add_deep_gene(f, name, "call", old_keys)
             for name in rust_inherits:
+                n_deep += self._add_deep_gene(f, name, "inherit", old_keys)
+        elif ext in (".c", ".h", ".cpp"):
+            c_calls, c_inherits = extract_c_call_graph(f)
+            for name in c_calls:
+                n_deep += self._add_deep_gene(f, name, "call", old_keys)
+            for name in c_inherits:
                 n_deep += self._add_deep_gene(f, name, "inherit", old_keys)
         return n_imp, n_deep
 

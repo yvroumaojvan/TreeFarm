@@ -11,8 +11,8 @@ import os
 import re
 from typing import List, Optional, Set, Tuple
 
-from .common import (GO_KEYWORDS, JAVA_KEYWORDS, JS_KEYWORDS, RUST_KEYWORDS,
-                     _JAVA_DEF_PREFIX, _cache, read_text)
+from .common import (CPP_KEYWORDS, GO_KEYWORDS, JAVA_KEYWORDS, JS_KEYWORDS,
+                     RUST_KEYWORDS, _JAVA_DEF_PREFIX, _cache, read_text)
 
 
 # ========== 基因提取（多语言） ==========
@@ -443,6 +443,137 @@ def extract_rust_call_graph(rs_file: str) -> Tuple[List[str], List[str]]:
     return uniq_calls, sorted(set(inherits))
 
 
+# ========== C/C++ 函数级分析（v4.9.8 新增，零依赖轻量解析器） ==========
+# 覆盖 .c/.h/.cpp：函数定义（含指针返回/类作用域 ::/构造析构 ~/抽象 =0[免]),
+# 函数调用（obj.method / ptr->method / ns::func）、类继承（class X : public Y）。
+# 统一按 C++ 关键字解析（C++ 关键字是 C 超集，解析 .c 无副作用）。
+
+_CPLUS_TRAILERS = r"(?:\s+(?:const|volatile|noexcept|override|final|requires\s*\([^)]*\)))*"
+
+
+def _strip_c_noise(text: str) -> str:
+    """去掉 C/C++ 注释、字符串、字符字面量、预处理指令，替换为空格（v4.9.8）。
+    顺序关键（沿用 Rust 教训）：
+      0. #if 0 ... #endif 禁用块整块剥掉（真实项目超常见，函数提取不能进禁用代码）
+      1. 字符串先于 // 行注释（"http://x" 里的 // 不能被当成注释吃掉后面）
+      2. char 字面量在字符串后（模板/泛型里的 'a' 不配对会吞代码，用 [^'\\]|\\. 限定）
+      3. 预处理整行（#include/#define/#if 等）最后清——# 可能出现在字符串里已清掉
+    """
+    text = re.sub(r"(?ms)^[ \t]*#[ \t]*if\s+0\b.*?^[ \t]*#[ \t]*endif\b", " ", text)
+    # v4.9.8 第5轮：残缺 #if 0（无 #endif 的截断文件）→ 剥到文件尾，防禁用代码被提取
+    text = re.sub(r"(?ms)^[ \t]*#[ \t]*if\s+0\b(?:(?!^[ \t]*#[ \t]*endif\b).)*", " ", text)
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', " ", text)       # 字符串
+    text = re.sub(r"'(?:[^'\\]|\\.)*'", " ", text)        # char 字面量
+    text = re.sub(r"//[^\n]*", " ", text)                 # 行注释
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)    # 块注释
+    text = re.sub(r"(?m)^[ \t]*#.*$", " ", text)          # 预处理整行
+    return text
+
+
+def _c_defs(text: str) -> List[Tuple[str, int, int, str]]:
+    """C/C++ 定义提取：[(name, offset, lineno, kind)]，kind ∈ {func, class}。
+
+    函数/方法：NAME(...) 后跟 {（含尾随 const/noexcept/override）；NAME 可带
+    ns::Class:: 作用域（构造/析构 ~Foo）、可带返回类型指针（前面部分不参与）。
+    排除：关键字（if/for/while/switch/return/new/delete/cast 等）、全大写宏名、
+    operator 运算符重载、函数声明（NAME(...) 后跟 ;）。
+    类/结构体/联合：class X : public Y { / struct X { / union X{（排除前向声明 X;）。
+    """
+    out: List[Tuple[str, int, int, str]] = []
+    # 类/结构体/联合定义（含继承列表 / final）；排除前向声明 class Foo; ——
+    # 继承列表由 extract_c 单独提（inherit 基因）
+    for m in re.finditer(
+            r"\b(class|struct|union)\s+([A-Za-z_]\w*)"
+            r"(?:\s+final)?\s*(?::\s*[^{]*)?\{", text):
+        if m.group(2) not in CPP_KEYWORDS:
+            out.append((m.group(2), m.start(2), _lineno_of(text, m.start(2)), "class"))
+    # 函数/方法定义：NAME(...){ / NAME(...) : init-list { （构造初始化列表）
+    # 类名可带模板参数：Stack<T>::push(const T&)（v4.9.8 模板方法形态）
+    for m in re.finditer(
+            r"(?m)(?!\b(?:if|for|while|switch|catch|return|sizeof|delete|new|"
+            r"static_cast|dynamic_cast|const_cast|reinterpret_cast|decltype|"
+            r"typeid|using|template)\s*\()"
+            r"(?<![\w:~])(~?[A-Za-z_]\w*(?:<[^>]*>)?(?:::[A-Za-z_~]\w*(?:<[^>]*>)?)*)"
+            r"\s*\(([^;{}]*)\)"
+            r"(?:\s*:\s*[^{;]+)?" + _CPLUS_TRAILERS + r"\s*(\{|;)",
+            text):
+        name = m.group(1)
+        root = name.split("::")[0]
+        if root in CPP_KEYWORDS:
+            continue
+        leaf = name.split("::")[-1]
+        if leaf.startswith("operator"):
+            continue                        # operator+ 等运算符重载
+        if m.group(3) == ";":
+            continue                        # 函数声明（.h 原型），非定义
+        if leaf.isupper():
+            continue                        # 全大写宏名（DECLARE_X(...) { 形态）
+        out.append((leaf, m.start(1), _lineno_of(text, m.start(1)), "func"))
+    return out
+
+
+def extract_c_call_graph(c_file: str) -> Tuple[List[str], List[str]]:
+    """轻量 C/C++ 函数级分析（v4.9.8 新增，零依赖启发式，非完整 AST）：
+    返回 (calls, inherits)：
+      calls    = 被调用名或作用域链（'func' / 'obj.method' / 'p->method'->'method' /
+                 'ns::func'->'ns.func'）；:: 转为 . 便于跨文件符号匹配
+      inherits = 类继承/实现的基类名（class X : public Y / struct S : B）
+    已剔除注释、字符串、预处理噪音；定义行/声明行/析构 ~/运算符重载不视为调用。
+    精确度靠 _build_genes 的跨文件符号验证兜底，不追求 100% AST 级。"""
+    text = _strip_c_noise(read_text(c_file))
+    if not text:
+        return [], []
+
+    def_offsets: Set[int] = set()
+    decl_offsets: Set[int] = set()
+    for name, off, _, _ in _c_defs(text):
+        def_offsets.add(off)
+    # 声明行（.h 原型 / 纯虚 = 0）：NAME(...) ;  → 名字位置加入排除集合。
+    # 严格要求「返回类型 + NAME(...) ;」形态（int add(int a); / virtual void run() = 0;），
+    # 避免把真实调用语句 add(1, helper(2)); 误判为声明（首轮实测驱动）。
+    # 返回类型排除语句关键字：return/if/for/while... 否则 "return used_func();"
+    # 会被误判成「伪类型 return + 声明」，把真实调用吞掉（第2轮实测驱动）。
+    for m in re.finditer(
+            r"(?<![\w:~])(?:(?:virtual|static|extern|constexpr|inline|friend|"
+            r"explicit|mutable|const)\s+)*"
+            r"(?!\b(?:return|if|for|while|switch|catch|sizeof|new|delete|goto|"
+            r"throw|case|do|else|continue|break|typedef)\b)"
+            r"([A-Za-z_]\w*(?:\s+\w+){0,2}(?:\s*[*&]+)?)"   # 返回类型：≤3 词 + 可选指针（有界，防 ReDoS）
+            r"\s+"
+            r"(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)"
+            r"(?:\s*(?:const|override|noexcept|final|volatile))*\s*(?:=\s*0)?\s*;",
+            text):
+        decl_offsets.add(m.start(2))
+
+    inherits: List[str] = []
+    # class Foo : public Bar, private Baz {
+    for m in re.finditer(
+            r"\b(?:class|struct|union)\s+[A-Za-z_]\w*\s*:\s*"
+            r"(?:public|private|protected)\s+([\w:]+)", text):
+        inherits.append(m.group(1))
+
+    calls: List[str] = []
+    for m in re.finditer(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+                         r"(?:::[A-Za-z_~]\w*)*)\s*\(", text):
+        name = m.group(1).replace("::", ".")
+        root = name.split(".")[0]
+        if root in CPP_KEYWORDS or root.isupper():
+            continue                       # 关键字调用（if(/return(） / 宏调用
+        pre = text[max(0, m.start() - 80):m.start()]
+        if pre.rstrip().endswith("~"):
+            continue                       # ~Foo( 析构调用（含 ~Foo() 定义里的 Foo(）
+        if re.search(r"\)\s*[,:]\s*$", pre) or re.search(r"\(\s*[,:]\s*$", pre):
+            continue                       # 构造初始化列表 Foo() : count_(0) / 补参, field(x)
+        if m.start(1) in def_offsets or m.start(1) in decl_offsets:
+            continue                       # 函数/方法定义行或声明行，非调用
+        if "operator" in name:
+            continue                       # operator<( 等重载，非普通调用
+        calls.append(name)
+    seen_calls: Set[str] = set()
+    uniq_calls = [c for c in calls if not (c in seen_calls or seen_calls.add(c))]
+    return uniq_calls, sorted(set(inherits))
+
+
 # ========== 多语言定义提取（v3.5：死代码 / 复杂度共用；v3.7 加入 Rust） ==========
 def _lineno_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
@@ -554,6 +685,11 @@ def _count_complexity(body: str, lang: str) -> int:
         c += len(re.findall(r"\b(?:if|for|while|loop|match|case)\b", body))
         c += len(re.findall(r"&&|\|\|", body))
         c += len(re.findall(r"\?\s*[;\)\}]", body))      # ? 传播运算符（排除 ?Sized / ?'a）
+    elif lang in ("c", "cpp"):
+        c += len(re.findall(r"\b(?:if|for|while|switch|do|catch)\b", body))
+        c += len(re.findall(r"&&|\|\|", body))
+        c += len(re.findall(r"\?[^?.]", body))           # 三元（排除 ?. 与 ? 语句）
+        c += len(re.findall(r"\bcase\s+[^:;]*:", body))  # switch case（单独计数，防双重）
     return c
 
 

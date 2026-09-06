@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.7"                # 工具版本（v4.9.7：OWASP 对抗靶场三修——参数化SQL误报豁免/os.system拼接漏报补捕/meta refresh重定向漏报补捕，437 测试全绿）
+VERSION = "4.9.8"                # 工具版本（v4.9.8：C/C++ 函数级分析——函数提取/调用图/类继承/复杂度/死代码/跨文件基因/安全规则，499 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -81,6 +81,26 @@ RUST_KEYWORDS = {"as", "async", "await", "break", "const", "continue", "crate",
                  "while", "union", "abstract", "become", "box", "do", "final",
                  "macro", "override", "priv", "typeof", "unsized", "virtual",
                  "yield", "try", "macro_rules"}
+
+# C 关键字（C89~C17；typeof 为 GNU 扩展，宏名匹配用）
+C_KEYWORDS = {"auto", "break", "case", "char", "const", "continue", "default",
+              "do", "double", "else", "enum", "extern", "float", "for", "goto",
+              "if", "inline", "int", "long", "register", "restrict", "return",
+              "short", "signed", "sizeof", "static", "struct", "switch", "typedef",
+              "union", "unsigned", "void", "volatile", "while", "typeof", "_Bool",
+              "_Complex", "_Generic", "_Noreturn", "_Static_assert", "_Thread_local"}
+
+# C++ 关键字（在 C 基础上追加；含 operator/cast 形态，调用检测排除用）
+CPP_KEYWORDS = C_KEYWORDS | {"alignas", "alignof", "and", "and_eq", "asm", "bitand",
+              "bitor", "bool", "catch", "char16_t", "char32_t", "char8_t", "class",
+              "co_await", "co_return", "co_yield", "compl", "concept", "consteval",
+              "constexpr", "const_cast", "decltype", "delete", "dynamic_cast",
+              "explicit", "export", "false", "friend", "mutable", "namespace",
+              "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or",
+              "or_eq", "private", "protected", "public", "reinterpret_cast",
+              "requires", "static_assert", "static_cast", "template", "this",
+              "thread_local", "throw", "true", "try", "typeid", "typename",
+              "using", "virtual", "wchar_t", "xor", "xor_eq"}
 
 # ========== 基因格式 schema（快递单 v3） ==========
 GENE_SCHEMA = {
@@ -339,8 +359,9 @@ class FileCache:
             # v3.3/v3.4：JS/TS 箭头函数符号（const/let/var name = (...) => 或 name = x =>）
             syms += re.findall(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"
                                r"(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>", text)
-            # Go 走专属正则（见下方），跳过通用方法定义正则（会把 import ( 误判成符号）
-            if not path.endswith(".go"):
+            # Go / C/C++ 走专属正则（见下方），跳过通用方法定义正则（会把 import(
+            # / 宏调用 / 控制流 if( 误判成符号）
+            if not path.endswith((".go", ".c", ".h", ".cpp")):
                 syms += re.findall(r"\b(?:public|private|protected)?\s*(?:static\s+)?\w[\w<>, \[\]]*\s+(\w+)\s*\(", text)
             # v3.4：Java 方法定义符号（修饰符/返回类型 + 名字 + (...) [throws] { 或 ;）
             if path.endswith(".java"):
@@ -357,6 +378,38 @@ class FileCache:
             if path.endswith(".rs"):
                 syms += re.findall(r"\bfn\s+([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\(", text)
                 syms += re.findall(r"\b(?:struct|enum|trait)\s+([A-Za-z_]\w*)", text)
+            # v4.9.8：C/C++ 函数/方法/类符号（NAME(...){ 定义 / class|struct|union X {）
+            # 复用轻量去噪：先剥注释/字符串/预处理，再用定义正则提取
+            if path.endswith((".c", ".h", ".cpp")):
+                clean = re.sub(r'"(?:[^"\\]|\\.)*"', " ", text)
+                clean = re.sub(r"'(?:[^'\\]|\\.)*'", " ", clean)
+                clean = re.sub(r"//[^\n]*", " ", clean)
+                clean = re.sub(r"/\*.*?\*/", " ", clean, flags=re.S)
+                clean = re.sub(r"(?m)^[ \t]*#.*$", " ", clean)
+                for m in re.finditer(
+                        r"(?m)(?!\b(?:if|for|while|switch|catch|return|sizeof|delete|new|"
+                        r"static_cast|dynamic_cast|const_cast|reinterpret_cast|decltype|"
+                        r"typeid|using|template)\s*\()"
+                        r"(?<![\w:~])(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)"
+                        r"(?:\s*:\s*[^{;]+)?(?:\s+(?:const|volatile|noexcept|override|final))*\s*\{",
+                        clean):
+                    leaf = m.group(1).split("::")[-1]
+                    if leaf.startswith("operator") or leaf.isupper():
+                        continue
+                    syms.append(leaf)
+                # 声明形态（.h 原型 / 纯虚）：返回类型 + NAME(...) ; → 也算符号
+                # （跨文件验证需要：a.c 调用 foo() 时 foo 的声明在 .h 里）
+                for m in re.finditer(
+                        r"(?<![\w:~])(?:(?:virtual|static|extern|constexpr|inline|friend|"
+                        r"explicit|mutable|const)\s+)*([A-Za-z_]\w*(?:\s*[*&]+\s*|\s+)+)"
+                        r"(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)"
+                        r"(?:\s*(?:const|override|noexcept|final|volatile))*\s*(?:=\s*0)?\s*;",
+                        clean):
+                    leaf = m.group(2).split("::")[-1]
+                    if leaf.startswith("operator") or leaf.isupper():
+                        continue
+                    syms.append(leaf)
+                syms += re.findall(r"\b(?:class|struct|union)\s+([A-Za-z_]\w*)\s*\{", clean)
         return sorted(set(syms))
 
     @staticmethod
