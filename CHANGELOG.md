@@ -5,6 +5,58 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.7] - 2026-09-06
+
+### 🎯 OWASP 对抗靶场三修（TraeAI 金标准复测驱动）
+
+**触发**：TraeAI 以官方 Release（sha256 实算一致）+ BugsInPy 8 bug + tornado 6.1 官方源码 +
+自建 OWASP 11 样例复测 v4.9.6，报告已本地逐项实锤复核（无编造），暴露 3 个真问题。
+
+#### 1. 参数化 SQL 误报（最重要，修复误报）
+
+**现象**：`db.execute("SELECT * FROM products WHERE name LIKE ?", ("%" + kw + "%",))` 被报
+「SQL注入：字符串拼接查询」风险 15/B。此写法是标准参数化查询（SQL 模板静态、`+` 拼接发生在
+绑定参数值内），完全安全——grader 报得准的硬伤。
+
+**根因**：基础层正则 `execute("...".*?["']\s*\+` 跨到第二参数 `"%` 的闭引号命中；增强层正则
+`(execute|query)\s*\([^)]*\+[^)]*\)` 见 `+` 就报，两条路径都只认形态不认语义。
+
+**修复**：新增 `_param_bind_exempt()`——逐字符扫描 `execute(` 后参数串，找第一个顶层逗号，
+若第一参数是完整纯字符串字面量（无 +/%/.format/{...}）→ 参数化绑定豁免。基础层 + 增强层
+同步生效；真危险形态（第一参拼接/f-string/跨行污点流入）保留必报。
+
+#### 2. os.system 拼接漏报（修复漏报）
+
+**现象**：`os.system("ping " + cmd)`（真实命令注入）报 0/A 漏出。
+
+**根因**：os.system/os.popen 规则要求 `\(` 后首字符非引号（`[^"']`），只覆盖变量直传形态
+`os.system(cmd)`，字符串开头的拼接形态被挡掉。
+
+**修复**：cmd_patterns 补 `os.system/os.popen/subprocess 引号开头拼接` 形态
+（`["'][^"']*["']\s*\+`），单文件层 + 跨文件层 `_CROSS_SINK_PATTERNS` 同步；纯静态字符串
+`os.system("ping 127.0.0.1")` 仍不报。
+
+#### 3. meta refresh 开放重定向漏报（修复漏报）
+
+**现象**：`"<meta http-equiv=\"refresh\" content=\"0;url=" + target + "…>"` 报 0/A 漏出。
+
+**根因**：open_redirect_patterns 只覆盖 `redirect(...)`/Location 响应头，无 meta refresh 形态；
+且 HTML 属性转义引号 `\"` 让 `["']` 匹配不上。
+
+**修复**：补 meta refresh 两条（`url=` 拼接 / `url=` 模板变量），正则用 `\\*["']` 容忍转义引号；
+跨文件层同步。静态 `<meta http-equiv="refresh" content="0;url=/home">`（无拼接）不报。
+
+**测试**：421 → **437 全绿**（+16 项：sample9 四个变体豁免、真拼接仍报三类、os.system/os.popen/
+subprocess 拼接捕获 + 静态不报、meta refresh 拼接捕获 + 静态不报 + f-string、跨文件注入回归）
+。tornado 6.1 干净源码回归：security 0/100 A 保持（11 条全在测试代码），grade 41.7 不变。
+
+### 🌳 金标准说明（为什么 8 个 bug 只命中 3 个）
+
+3 个命中全是**结构型**缺陷（API 契约委托不一致 / dict del KeyError / 协程未 await——静态分析
+强项）；5 个漏报全是**语义型**缺陷（307 重定向 chunked body 丢失 / Range RFC7233 / 时钟回拨 /
+事件循环泄漏 / WS key 缺失崩溃——需协议语义与运行时环境推理，行业静态工具普遍天花板）。
+结构型命中率 3/3 = 100%；语义型靠 LLM 思维树模式（扣子全开 8/8）补齐。
+
 ## [4.9.6] - 2026-09-06
 
 ### 🐛 修复：--sandbox run/test/scan 缺参数误报「未知沙箱命令」

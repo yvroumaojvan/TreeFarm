@@ -1942,7 +1942,7 @@ class TestModuleStructure(unittest.TestCase):
         self.assertIs(tf.TreeFarm, CoreTreeFarm)
 
     def test_version_bumped(self):
-        self.assertEqual(tf.VERSION, "4.9.6")
+        self.assertEqual(tf.VERSION, "4.9.7")
 
 
 if __name__ == "__main__":

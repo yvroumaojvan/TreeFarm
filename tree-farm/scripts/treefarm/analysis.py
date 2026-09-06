@@ -1434,6 +1434,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             sql_hits = set()
             for pattern, desc in sql_patterns:
                 if re.search(pattern, line):
+                    # v4.9.7：参数化绑定豁免——execute("静态SQL模板", (参数,)) 时，
+                    # 「+」只会出现在绑定参数值里（如 ("%" + kw + "%",)），SQL 模板无拼接，
+                    # 属于安全写法，不报（OWASP 对照靶场 sample9 误报修复）
+                    if _param_bind_exempt(line):
+                        continue
                     issues.append({"file": rel, "line": i, "type": "SQL注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
@@ -1444,10 +1449,16 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             cmd_patterns = [
                 (r'''os\.system\s*\(\s*[^"']''', "命令注入：os.system接收变量"),
                 (r'''os\.popen\s*\(\s*[^"']''', "命令注入：os.popen接收变量"),
+                # v4.9.7：引号拼接形态——os.system("ping " + cmd) 之前被 [^"'] 挡掉漏报
+                (r'''os\.system\s*\(\s*["'][^"']*["']\s*\+''', "命令注入：os.system字符串拼接命令"),
+                (r'''os\.popen\s*\(\s*["'][^"']*["']\s*\+''', "命令注入：os.popen字符串拼接命令"),
                 (r'''subprocess\.(call|run|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True''',
                  "命令注入：subprocess shell=True"),
                 (r'''subprocess\.(call|run|Popen)\s*\(\s*(?!\[)[^"'].*?\+''',
                  "命令注入：subprocess拼接命令"),
+                # v4.9.7：subprocess.call("ls " + cmd) 引号拼接形态
+                (r'''subprocess\.(call|run|Popen)\s*\(\s*["'][^"']*["']\s*\+''',
+                 "命令注入：subprocess字符串拼接命令"),
             ]
             for pattern, desc in cmd_patterns:
                 if re.search(pattern, line):
@@ -1677,6 +1688,10 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     # {} 只是生成占位符数量（如 {marks} = "?,?,?"），是安全的
                     if pattern.startswith("f[\"']") and "?" in line:
                         continue
+                    # v4.9.7：参数化绑定豁免——execute("静态SQL模板", (参数,)) 形态，
+                    # SQL 模板无拼接，「+」只在绑定参数值里 → 安全（OWASP sample9 误报修复）
+                    if pattern.startswith(r'''(execute|query)\s*\([^)]*\+''') and _param_bind_exempt(line):
+                        continue
                     issues.append({"file": rel, "line": i, "type": "SQL注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
@@ -1774,6 +1789,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "开放重定向：响应头 Location 来自用户输入"),
                 (r'''headers\s*\[\s*["'](?:Location|location)["']\s*\]\s*=\s*(request\.|params\[|args\[|form\[)''',
                  "开放重定向：响应头 headers['Location'] 来自用户输入"),
+                # v4.9.7：meta refresh 形态——<meta http-equiv="refresh" content="0;url=" + target>
+                # （\\* 容忍 HTML 属性中的转义引号 \"）
+                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\\*["']?\s*\+''',
+                 "开放重定向：meta refresh url 拼接不可信内容（可被劫持跳转到钓鱼站）"),
+                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\{''',
+                 "开放重定向：meta refresh url 为模板变量（若内容含用户输入可被劫持）"),
             ]
             for pattern, desc in open_redirect_patterns:
                 if re.search(pattern, line):
@@ -2065,7 +2086,7 @@ def _expand_taint_in_file(lines: List[str], params: List[str]) -> Set[str]:
 _CROSS_SINK_PATTERNS = [
     (r'''(?<!self)\.(execute|query|raw)\s*\(|(?<![\w.])execute\s*\(\s*[a-zA-Z_]''',
      "SQL注入", "critical", "污点参数流入SQL查询（跨文件数据流，需人工确认）"),
-    (r'''os\.system\s*\([^"']|os\.popen\s*\([^"']|subprocess\.(call|run|Popen)\s*\(\s*(?!\[|["'])''',
+    (r'''os\.system\s*\([^"']|os\.popen\s*\([^"']|subprocess\.(call|run|Popen)\s*\(\s*(?!\[|["'])|os\.system\s*\(\s*["'][^"']*["']\s*\+|os\.popen\s*\(\s*["'][^"']*["']\s*\+|subprocess\.(call|run|Popen)\s*\(\s*["'][^"']*["']\s*\+''',
      "命令注入", "critical", "污点参数流入命令执行（跨文件数据流，需人工确认）"),
     (r'''(?<!def\s)(?<![\w.])\bopen\s*\(|send_file\s*\(''',
      "路径遍历", "high", "污点参数流入文件路径（跨文件数据流，需人工确认）"),
@@ -2073,7 +2094,49 @@ _CROSS_SINK_PATTERNS = [
      "SSRF", "high", "污点参数流入URL请求（跨文件数据流，需人工确认）"),
     (r'''(?<!def\s)\bredirect\s*\(''',
      "开放重定向", "medium", "redirect 目标来自跨文件污点参数（需人工确认）"),
+    (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\\*["']?\s*\+''',
+     "开放重定向", "medium", "meta refresh url 拼接来自跨文件污点参数（需人工确认）"),
 ]
+
+
+def _param_bind_exempt(line: str) -> bool:
+    """v4.9.7：参数化绑定豁免——execute("静态SQL模板", (绑定参数,)) 形态。
+
+    逐个字符扫描 execute( 后的参数串，找第一个「顶层逗号」（忽略括号/引号内逗号）。
+    若第一参数是完整字符串字面量、且内部无拼接/格式化标记（+、%、.format、{...}），
+    说明 SQL 模板本身静态，「+」只出现在绑定参数值里 → 安全，豁免（OWASP 对照靶场
+    sample9 误报修复：`db.execute("SELECT ... LIKE ?", ("%" + kw + "%",))`）。
+    """
+    mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
+    if not mc:
+        mc = re.search(r'''(?<!self)\.(?:execute|query|raw)\s*\((.*)$''', line)
+    if not mc:
+        return False
+    argstr = mc.group(1)
+    depth = 0
+    quote = None
+    for k, ch in enumerate(argstr):
+        if quote:
+            if ch == quote and (k == 0 or argstr[k - 1] != "\\"):
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif ch == "," and depth == 0:
+            first = argstr[:k].strip()
+            # 第一参数必须是完整的纯字符串字面量（引号开头引号结尾，中间无引号）
+            if re.fullmatch(r'''["'][^"']*["']''', first):
+                inner = first[1:-1]
+                if not re.search(r'''\+|%|\.format|\{[^}]*\}''', inner):
+                    return True
+            return False
+    return False
 
 
 def _is_safe_cross_sql_call(line: str, params: List[str]) -> bool:
