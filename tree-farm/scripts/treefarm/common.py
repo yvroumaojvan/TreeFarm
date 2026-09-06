@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.5"                # 工具版本（v4.9.5：跨文件污点检测——强污点实参跨模块传入函数参数流入危险 sink 才报，含两层透传链/拼接传播/来源追溯/ORM白名单/参数化与列表Popen豁免，414 测试全绿）
+VERSION = "4.9.6"                # 工具版本（v4.9.6：--sandbox run/test/scan 缺参数时友好提示用法，不再误报「未知沙箱命令」+ README/SKILL 文档同步，421 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

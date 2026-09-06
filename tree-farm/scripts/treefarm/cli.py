@@ -516,6 +516,11 @@ def _dispatch_sandbox(rest: List[str]) -> None:
             finally:
                 profiler.disable()
             print(profiler.print_report(top_n=10))
+    elif sub in ("run", "运行", "执行", "exec", "trace", "追踪", "调用", "cov", "coverage", "覆盖率",
+                 "test", "测试", "scan", "安全扫描", "quality", "质量", "profile", "性能"):
+        # v4.9.6 修复：已知命令缺参数时明确提示用法，不再误报「未知沙箱命令」
+        print(f"❌ 缺少参数：--sandbox {sub} 需要后续参数")
+        print("💡 用法: --sandbox run <code> | run <lang> <code> | test <file> | scan <file> | trace <code> | cov <code> | quality <file> | profile <file>")
     else:
         print(f"❌ 未知沙箱命令: {sub}")
         print("💡 支持: on/off/status/lang/run/trace/cov/test/scan/quality/profile")

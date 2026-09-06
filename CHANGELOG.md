@@ -5,6 +5,30 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.6] - 2026-09-06
+
+### 🐛 修复：--sandbox run/test/scan 缺参数误报「未知沙箱命令」
+
+**触发**：扣子AI 基准测试报告（BugsInPy tornado 8 真实缺陷，全开 8/8 命中根因）指出
+`--sandbox run/test/scan` 帮助声明支持但实际报「❌ 未知沙箱命令」，且错误提示同时
+列出 支持: on/off/status/lang/run/trace/cov/test/scan/quality/profile——帮助与实现打架。
+
+**根因**：cli.py 沙箱分发各分支要求 `len(rest) >= 2`（必须带后续参数），缺参数时直接
+掉进「未知沙箱命令」兜底分支。功能本体完好（带参数可正常执行），但报错信息误导用户
+以为功能不存在。
+
+**修复**：已知命令（run/trace/cov/test/scan/quality/profile）缺参数时明确提示
+「❌ 缺少参数」+ 具体用法；只有命令完全不在列表里才报「未知沙箱命令」。
+
+**测试**：414 → **421 全绿**（+7 项：run/test/scan/trace 缺参友好提示、未知命令仍报
+未知、run 带参执行、scan 带文件执行）
+
+### 📚 文档同步 v4.8.2 → v4.9.6
+
+README.md 与 SKILL.md 版本信息同步：版本号（v4.8.2 → v4.9.6）、测试数（313 → 421）、
+补 v4.9 功能说明（污点分级 param/concat/user、跨文件污点检测 a.py→b.py 两层透传+来源追溯、
+tornado 金标准 0/100 A 误报治理、BugsInPy 基准 8/8 战绩）。
+
 ## [4.9.5] - 2026-09-06
 
 ### ✨ 新能力：跨文件污点检测（a.py 用户输入 → b.py 危险函数漏报修复）
