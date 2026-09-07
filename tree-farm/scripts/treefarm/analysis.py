@@ -1526,7 +1526,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             if not m:
                 m = re.search(r'''(\w{1,64})\s*=\s*sys\.argv\[''', ln)
             if not m:
-                m = re.search(r'''(\w{1,64})\s*=\s*(?:params|request\.query|self\.request)\s*\.get\s*\(''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*(?:params|request\.query|self\.request|request)\s*\.get\s*\(''', ln)
             if m:
                 _mark_taint(m.group(1), "user")
             # 污点传播：y = x（x 是污点变量，来源继承）
@@ -1931,10 +1931,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''headers\s*\[\s*["'](?:Location|location)["']\s*\]\s*=\s*(request\.|params\[|args\[|form\[)''',
                  "开放重定向：响应头 headers['Location'] 来自用户输入"),
                 # v4.9.7：meta refresh 形态——<meta http-equiv="refresh" content="0;url=" + target>
-                # （\\* 容忍 HTML 属性中的转义引号 \"）
-                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\\*["']?\s*\+''',
+                # （\\* 容忍 HTML 属性中的转义引号 \"；v4.9.9：url= 后允许「反斜杠+引号」重复，
+                #  修复 \" 转义变体：content="0;url=\\"' + target（双引号+闭合引号两个引号连排））
+                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*(?:\\*["']\s*)*\+''',
                  "开放重定向：meta refresh url 拼接不可信内容（可被劫持跳转到钓鱼站）"),
-                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\{''',
+                (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*(?:\\*["']\s*)*\{''',
                  "开放重定向：meta refresh url 为模板变量（若内容含用户输入可被劫持）"),
             ]
             for pattern, desc in open_redirect_patterns:
@@ -2061,6 +2062,29 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "severity": "medium", "desc": "redirect 目标来自污点变量（用户输入/拼接传播）", "code": stripped[:100]})
                     severity_count["medium"] += 1
                     continue
+
+        # v4.9.9：真并发文件的竞态条件并入安全层——OWASP 对抗靶场 sample8 期望 --security 报出。
+        # 复用逻辑层 AST 检测：仅显式 threading.Thread 等真并发触发；异步事件循环 +
+        # 线程池 offload（tornado ioloop 模式）降级不报（v4.9.4 竞态误报治理成果保持）。
+        # 注意：必须在 tainted_vars 块外、每文件只执行一次（原实现在 for 行循环内导致
+        # 无用户输入源的文件永不执行 + 每行重复 parse）。
+        if rel.endswith(".py"):
+            try:
+                _race_tree = ast.parse(full_text)
+            except SyntaxError:
+                _race_tree = None
+            if _race_tree is not None:
+                if re.search(r"\basync\s+def\b|\bawait\b", full_text):
+                    _race_threads = _tree_starts_threads(_race_tree, executors_are_threads=False)
+                else:
+                    _race_threads = _tree_starts_threads(_race_tree)
+                if _race_threads:
+                    _vis_race = _LogicVisitor(lines, rel, True)
+                    _vis_race._check_race(_race_tree)
+                    for _ri in _vis_race.issues:
+                        if _ri["type"] == "竞态条件":
+                            issues.append(_ri)
+                            severity_count[_ri["severity"]] += 1
 
     # v4.9.5：第二阶段——跨文件污点注入补扫（单层：a.py 强污点实参 → b.py 函数参数流入危险 sink）
     if cross_calls:
@@ -2235,7 +2259,7 @@ _CROSS_SINK_PATTERNS = [
      "SSRF", "high", "污点参数流入URL请求（跨文件数据流，需人工确认）"),
     (r'''(?<!def\s)\bredirect\s*\(''',
      "开放重定向", "medium", "redirect 目标来自跨文件污点参数（需人工确认）"),
-    (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*\\*["']?\s*\+''',
+    (r'''http-equiv\s*=\s*\\*["']refresh\\*["'][^>]*content\s*=\s*\\*["'][^"']*url\s*=\s*(?:\\*["']\s*)*\+''',
      "开放重定向", "medium", "meta refresh url 拼接来自跨文件污点参数（需人工确认）"),
 ]
 
@@ -2971,12 +2995,37 @@ class _LogicVisitor(ast.NodeVisitor):
                           f"对象生命周期由外部持有时（如事件循环），已关闭实例永久驻留 → 内存泄漏，"
                           f"建议 weakref.WeakKeyDictionary 或 close 时显式清理")
 
-    # ---- 竞态条件：仅当文件真实使用线程 + 共享属性自增无锁 ----
-    def _has_lock_in_scope(self, node):
-        scope = self._enclosing_func(node)
-        if scope is None:
+    # ---- 竞态条件：仅当文件真实使用线程 + 共享变量自增无锁 ----
+    def _is_module_global(self, name: str, tree) -> bool:
+        """v4.9.9：变量是否为模块级共享状态——模块顶层赋值过，或函数内 global 声明过。
+        （扣子 race.py 漏报根因：原检测只认 self.attr / d[k] 形态，全局 counter += 1 不报）"""
+        for stmt in tree.body:
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                for t in targets:
+                    if isinstance(t, ast.Name) and t.id == name:
+                        return True
+        for stmt in ast.walk(tree):
+            if isinstance(stmt, ast.Global) and name in stmt.names:
+                return True
+        return False
+
+    def _func_of(self, tree, node):
+        """节点所属的最内层函数（行号范围判定）。_check_race 在 visit 完成后调用，
+        _anc 栈已空，不能用 _enclosing_func（原 lock 豁免因此恒失效）。"""
+        best = None
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if fn.lineno <= node.lineno <= getattr(fn, "end_lineno", fn.lineno):
+                    if best is None or fn.lineno > best.lineno:
+                        best = fn
+        return best
+
+    def _func_has_lock(self, fn) -> bool:
+        """函数体内是否存在锁保护（with lock / .acquire()）。"""
+        if fn is None:
             return False
-        for n in ast.walk(scope):
+        for n in ast.walk(fn):
             if isinstance(n, ast.With):
                 for item in n.items:
                     try:
@@ -2990,9 +3039,13 @@ class _LogicVisitor(ast.NodeVisitor):
                 return True
         return False
 
+    def _has_lock_in_scope(self, node):
+        return self._func_has_lock(self._func_of(self._tree, node))
+
     def _check_race(self, tree):
         if not self.has_threads:
             return
+        self._tree = tree
         for n in ast.walk(tree):
             target = None
             if (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Attribute)
@@ -3000,6 +3053,9 @@ class _LogicVisitor(ast.NodeVisitor):
                 target, op = n.target, n.op
             elif (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Subscript)
                     and isinstance(n.target.value, ast.Name)):
+                target, op = n.target, n.op
+            elif (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name)
+                    and self._is_module_global(n.target.id, tree)):
                 target, op = n.target, n.op
             elif (isinstance(n, ast.Assign) and isinstance(n.value, ast.BinOp)
                     and isinstance(n.targets[0], ast.Attribute)
@@ -3019,9 +3075,13 @@ class _LogicVisitor(ast.NodeVisitor):
                     what = f"self.{target.attr}"
                     if target.attr in ("lock", "mutex"):
                         continue
-                else:
+                elif isinstance(target, ast.Subscript):
                     what = f"{ast.unparse(target.value)}[{ast.unparse(target.slice)}]"
                     if "lock" in what.lower() or "mutex" in what.lower():
+                        continue
+                else:
+                    what = target.id
+                    if what in ("lock", "mutex"):
                         continue
                 if not self._has_lock_in_scope(target):
                     self._add(target.lineno, "竞态条件", "high",

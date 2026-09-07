@@ -5,6 +5,37 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.9] - 2026-09-07
+
+### 🔧 扣子金标准复测四修（第三方报告逐项本地实锤，剑指 S 级）
+
+**背景**：扣子AI（豆包系）v4.9.8 金标准复测报告——迄今最靠谱第三方报告，
+sha256/字节数/测试数/版本三连全部核实。评级 A，距 S 的两项差距 =
+OWASP 未全中 + 头文件全扫卡死。本轮全部修复。
+
+**修复（扣子报告实锤 → 本地复现 → 修 → 回归测试）**：
+1. **声明正则 ReDoS（common.py）**：声明形态正则 `(?:\s*[*&]+\s*|\s+)+`
+   无界量词在 glibc features.h 风格（宏定义+续行）上灾难性回溯——1200 组
+   构造输入 6.4s（8 倍输入 → 30 倍耗时，二次方爆炸），/usr/include 全扫
+   120s 卡死。修复：**逐行 splitlines 匹配 + 量词收紧 `{0,4}`**（双保险），
+   实测 2000 组 0.65s 线性。
+2. **跨文件路径遍历漏报（analysis.py）**：污点源正则漏了裸 `request.get()`。
+   修复：`(?:params|request\.query|self\.request|request)` 补 `request` 直接
+   `.get(` 形态。a.py→b.py `open("/srv/data/" + name)` 应报。
+3. **全局共享变量竞态漏报（analysis.py）**：`counter += 1`（模块级全局 + 
+   `global` 声明）不报；且 `_has_lock_in_scope` 在 visit 后 `_anc` 栈空恒失效。
+   修复：`_is_module_global`（顶层赋值/global 声明判定）+ `_func_of` 行号范围
+   找函数 + 竞态并入 security 层（真并发 threading.Thread 才报，异步事件循环/
+   线程池 offload 降级不报，v4.9.4 误报治理成果保持）。顺带修复原实现嵌套在
+   `if tainted_vars:` 内导致**无用户输入源文件永不执行**的隐藏 bug。
+4. **meta refresh 转义引号变体漏报（analysis.py 三处正则）**：`url="` 处用
+   `\"` 转义时原正则不认。修复：`url\s*=\s*(?:\\*["']\s*)*\+` 兼容转义引号
+   连排（`\"`+闭合引号）。
+
+**验证**：506 测试全绿（499 + 7 项 v4.9.9 回归：ReDoS 头文件 <3s/4000 组 <5s、
+裸 request 跨文件路径遍历、全局竞态 security 命中 + 异步降级不报、转义引号变体
++ 常规形态不退化）；真实 glibc features.h 30s+ 卡死 → 0.01s。
+
 ## [4.9.8] - 2026-09-07
 
 ### 🏗️ C/C++ 函数级分析（用户全权委托十轮攻坚，目标 S 级）

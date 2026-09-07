@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.8"                # 工具版本（v4.9.8：C/C++ 函数级分析——函数提取/调用图/类继承/复杂度/死代码/跨文件基因/安全规则，499 测试全绿）
+VERSION = "4.9.9"                # 工具版本（v4.9.9：扣子金标准复测四修——声明正则逐行防ReDoS/裸request跨文件路径遍历/全局共享变量竞态并入安全层/meta refresh转义引号变体，506 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -399,16 +399,21 @@ class FileCache:
                     syms.append(leaf)
                 # 声明形态（.h 原型 / 纯虚）：返回类型 + NAME(...) ; → 也算符号
                 # （跨文件验证需要：a.c 调用 foo() 时 foo 的声明在 .h 里）
-                for m in re.finditer(
+                # v4.9.9：声明形态改逐行扫描 + 量词收紧为 {0,4}（双保险防 ReDoS）。
+                #   无界 (?:\s*[*&]+\s*|\s+)+ 在 glibc features.h 的宏定义+续行上
+                #   跨行灾难性回溯（扣子复测实锤：/usr/include 全扫 120s 卡死）；
+                #   实测单行内回溯路径有界可控，故拆行逐条匹配。
+                _decl_re = re.compile(
                         r"(?<![\w:~])(?:(?:virtual|static|extern|constexpr|inline|friend|"
-                        r"explicit|mutable|const)\s+)*([A-Za-z_]\w*(?:\s*[*&]+\s*|\s+)+)"
+                        r"explicit|mutable|const)\s+)*([A-Za-z_]\w*(?:\s*[*&]+\s*|\s+){0,4})"
                         r"(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)"
-                        r"(?:\s*(?:const|override|noexcept|final|volatile))*\s*(?:=\s*0)?\s*;",
-                        clean):
-                    leaf = m.group(2).split("::")[-1]
-                    if leaf.startswith("operator") or leaf.isupper():
-                        continue
-                    syms.append(leaf)
+                        r"(?:\s*(?:const|override|noexcept|final|volatile))*\s*(?:=\s*0)?\s*;")
+                for _decl_line in clean.splitlines():
+                    for m in _decl_re.finditer(_decl_line):
+                        leaf = m.group(2).split("::")[-1]
+                        if leaf.startswith("operator") or leaf.isupper():
+                            continue
+                        syms.append(leaf)
                 syms += re.findall(r"\b(?:class|struct|union)\s+([A-Za-z_]\w*)\s*\{", clean)
         return sorted(set(syms))
 
