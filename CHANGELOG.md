@@ -5,6 +5,43 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.10] - 2026-09-08
+
+### 🔧 扣子复测重大缺陷修复：定义形态正则 ReDoS 根治 + 2 条 logic 泛化误报豁免（剑指 S 级）
+
+**背景**：扣子AI（豆包系）v4.9.9 金标准复测报告——评级 A 带重大缺陷标注：
+v4.9.9 修好了声明形态正则（features.h 场景构造靶场通过），但**定义形态正则**
+在 glibc `tgmath.h` 类「纯宏头文件」上仍灾难性回溯：单文件 symbols 9.57s、
+/usr/include 全扫 120s 卡死（exit 124，卡 1/4764）。另附 tornado 6.1 干净源码
+回归的 2 条 logic 层泛化误报（扣子源码逐行核实）。
+
+**修复（扣子报告 → 本地复现 → 修 → 回归测试）**：
+1. **定义形态正则 ReDoS（common.py）**：`[^;{}]*` 无界 + `(?:\s*:\s*[^{;]+)?`
+   无界冒号组，在 `(?m)` 下跨行吞宏续行块；纯宏区（tgmath.h 类头文件）无
+   `;{}` 分隔时整块被吞 → 全失败路径灾难性回溯，`_Generic` 的 `default:` 正好
+   触发冒号组。本地复现：172KB 纯宏靶场 `symbols()` 15.45s 且漏报真实函数。
+   修复：**单行化 + 量词有界**（与 v4.9.9 声明正则同思路）——
+   `[^;{}\n]{0,512}` 参数列表单行有界、冒号组 `[ \t]*:[ \t]*[^{;\n]{0,128}`、
+   后缀关键词 `(?:[ \t]+(?:const|...)){0,4}`、名字与 `(` 间收紧 `[ \t]*`。
+   实测：同靶场 **15.45s → 0.54s**（28 倍提速，线性）；2400 组 4 倍规模 <5s。
+   附带修复：宏续行块把真实函数吞进参数区的**符号漏报**（real_fn 现在能提取）。
+   取舍：参数列表罕见跨行写法（K&R/超长参数）漏报符号，.h 原型由声明正则兜底。
+2. **字典键 get→del 保护分支豁免（analysis.py）**：tornado http1connection.py:725
+   `if headers.get("Content-Encoding") == "gzip": del headers[...]` —— 进分支即
+   证明 key 存在，del 不会 KeyError → 误报。修复：del 位于含同 key get 的
+   **真值条件分支**（test 顶层非 `not`）内即豁免；`if not d.get(k):` 这类
+   「key 缺失才进分支」的写法保持上报，裸 get→del（tornado#3 真 bug）保持报。
+3. **API契约 stream 空值保护豁免（analysis.py）**：tornado websocket.py:587
+   `send_error()` 有 `if self.stream is None: super().send_error(...)` 保护 →
+   调用前已确认非 None，非「委托对象不一致」bug → 误报。修复：方法体内对
+   `self.stream` 有 `is None / is not None` 比较即豁免（按方法粒度）；
+   无保护的 `set_nodelay`（tornado#1 真 bug）保持报。
+
+**验证**：516 测试全绿（506 + 10 项 v4.9.10 回归：tgmath 风格纯宏 600 组 <3s、
+2400 组 <5s 线性、真实定义不漏报、C++ 构造/初始化列表/成员函数体全提取、
+保护分支豁免 ×2 + 真 bug 仍报 ×2 + 按方法粒度混合豁免）；Node 14/14。
+修复前 vs 修复后：/usr/include 全扫 120s 卡死 → 单文件 9.57s → 0.54s。
+
 ## [4.9.9] - 2026-09-07
 
 ### 🔧 扣子金标准复测四修（第三方报告逐项本地实锤，剑指 S 级）

@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.9"                # 工具版本（v4.9.9：扣子金标准复测四修——声明正则逐行防ReDoS/裸request跨文件路径遍历/全局共享变量竞态并入安全层/meta refresh转义引号变体，506 测试全绿）
+VERSION = "4.9.10"               # 工具版本（v4.9.10：扣子复测定义形态正则 ReDoS 修复——[^;{}]* 单行化+量词有界 tgmath.h 类头文件 15.45s→0.54s；2 条 logic 泛化误报豁免：get→del 保护分支/stream None 保护；516 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -386,12 +386,23 @@ class FileCache:
                 clean = re.sub(r"//[^\n]*", " ", clean)
                 clean = re.sub(r"/\*.*?\*/", " ", clean, flags=re.S)
                 clean = re.sub(r"(?m)^[ \t]*#.*$", " ", clean)
+                # v4.9.10：定义形态正则 ReDoS 修复（扣子复测实锤：glibc tgmath.h
+                #   单文件 symbols 9.57s、/usr/include 全扫 120s 卡死）。
+                #   根因：无界 [^;{}]* 在 (?m) 下跨行吞宏续行块；纯宏区（tgmath.h
+                #   类头文件）无 ;{} 分隔时整块被吞 → 全失败路径灾难性回溯；
+                #   叠加无界冒号组 (?:\s*:\s*[^{;]+)? 被 _Generic 的 default: 触发
+                #   跨行吞。修复 = 单行化 + 量词有界（与 v4.9.9 声明正则同思路）：
+                #   [^;{}\n]{0,512}（参数列表单行有界）、冒号组 [ \t]*:[ \t]*[^{;\n]{0,128}、
+                #   后缀关键词组 (?:[ \t]+(?:const|...)){0,4}、名字与 ( 间收紧 [ \t]*。
+                #   取舍：参数列表跨行的罕见写法（K&R 风格/超长参数）会漏报符号，
+                #   .h 原型由下方声明正则兜底；漏报远好于卡死。
                 for m in re.finditer(
                         r"(?m)(?!\b(?:if|for|while|switch|catch|return|sizeof|delete|new|"
                         r"static_cast|dynamic_cast|const_cast|reinterpret_cast|decltype|"
-                        r"typeid|using|template)\s*\()"
-                        r"(?<![\w:~])(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)"
-                        r"(?:\s*:\s*[^{;]+)?(?:\s+(?:const|volatile|noexcept|override|final))*\s*\{",
+                        r"typeid|using|template)[ \t]*\()"
+                        r"(?<![\w:~])(~?[A-Za-z_]\w*(?:::[A-Za-z_~]\w*)*)[ \t]*\([^;{}\n]{0,512}\)"
+                        r"(?:[ \t]*:[ \t]*[^{;\n]{0,128})?"
+                        r"(?:[ \t]+(?:const|volatile|noexcept|override|final)){0,4}\s*\{",
                         clean):
                     leaf = m.group(1).split("::")[-1]
                     if leaf.startswith("operator") or leaf.isupper():

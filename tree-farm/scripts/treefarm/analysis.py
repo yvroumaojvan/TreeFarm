@@ -2871,6 +2871,33 @@ class _LogicVisitor(ast.NodeVisitor):
         return None
 
     # ---- v4.8：get 后 del 同一字典 key（tornado#3 型 bug：缓存 key 缺失抛 KeyError） ----
+    def _del_is_guarded(self, dict_var, key_dump):
+        """del 是否在「先 get 确认 key 存在」的保护分支内。
+        v4.9.10：tornado http1connection.py 常见安全惯用法
+            if headers.get("Content-Encoding") == "gzip":
+                del headers["Content-Encoding"]
+        进分支即证明 key 存在，del 不会 KeyError → 豁免。
+        只豁免「条件为真值判断」的分支；if not d.get(k): 这类
+        「key 缺失才进分支」的写法保持上报。"""
+        for p in reversed(self._anc):
+            if not isinstance(p, (ast.If, ast.While)) or not hasattr(p, "test"):
+                continue
+            test = p.test
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                continue
+            for n in ast.walk(test):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "get" and n.args):
+                    try:
+                        got_var = ast.unparse(n.func.value)
+                    except Exception:
+                        continue
+                    if got_var == dict_var:
+                        got_dump = ast.dump(n.args[0]) if n.args[0] else None
+                        if key_dump is None or got_dump == key_dump:
+                            return True
+        return False
+
     def visit_Delete(self, node):
         for t in node.targets:
             if not isinstance(t, ast.Subscript):
@@ -2899,6 +2926,9 @@ class _LogicVisitor(ast.NodeVisitor):
                         continue
                     got_dump = ast.dump(n.args[0]) if n.args[0] else None
                     if key_dump is None or got_dump == key_dump:
+                        if self._del_is_guarded(dict_var, key_dump):
+                            # 保护分支内 get→del：key 已被条件确认存在（tornado 惯用法），豁免
+                            break
                         self._add(t.lineno, "字典键不存在访问", "medium",
                                   f"先 {dict_var}.get(...) 后 del {dict_var}[...] 同一 key："
                                   f"key 缺失时 get 返回 None 但 del 直接抛 KeyError，"
@@ -3219,7 +3249,7 @@ class _ContractVisitor(ast.NodeVisitor):
     def _check_delegate_consistency(self, cls):
         # 收集本类所有方法(self, ...)体内用到的 self.<attr>.<meth>() 委托
         # 以及 __init__ 里 self.stream = None 之类
-        method_delegates = {}    # attr -> [ (method_name, lineno) ]
+        method_delegates = {}    # attr -> [ (method_name, method_node) ]
         stream_none = False
         for stmt in cls.body:
             if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -3227,7 +3257,7 @@ class _ContractVisitor(ast.NodeVisitor):
             mname = stmt.name
             collected = _collect_self_attr_calls(stmt)
             for attr in collected:
-                method_delegates.setdefault(attr, []).append((mname, stmt.lineno))
+                method_delegates.setdefault(attr, []).append((mname, stmt))
             if mname == "__init__":
                 for substmt in ast.walk(stmt):
                     if (isinstance(substmt, ast.Assign)
@@ -3253,9 +3283,13 @@ class _ContractVisitor(ast.NodeVisitor):
         # 若 stream 也被某方法用（且不是主流），报
         stream_uses = method_delegates.get("stream", [])
         if stream_uses and len(stream_uses) < best_count:
-            for mname, lineno in stream_uses:
+            for mname, mnode in stream_uses:
+                if _has_stream_none_guard(mnode):
+                    # v4.9.10：方法对 self.stream 有空值感知（if self.stream is None: 保护），
+                    # 属安全惯用法（tornado send_error 场景），非「错误委托」→ 豁免
+                    continue
                 self._add(
-                    lineno, "API契约",
+                    mnode.lineno, "API契约",
                     "high",
                     (f"方法 {mname}() 委托给 self.stream，但同类{best_count}个方法都委托 "
                      f"self.{best_attr}，疑似委托对象不一致（stream 在 __init__ 初值为 None，"
@@ -3336,6 +3370,22 @@ def _collect_self_attr_calls(func):
                 and n.func.value.value.id == "self"):
             attrs.add(n.func.value.attr)
     return attrs
+
+
+def _has_stream_none_guard(method):
+    """方法体内是否对 self.stream 做了空值感知（self.stream is None / is not None 比较）。
+    v4.9.10：tornado send_error 场景有 if self.stream is None: 保护分支，调用前已
+    确认非 None，不是「委托对象不一致」bug → 委托一致性规则豁免。"""
+    for n in ast.walk(method):
+        if (isinstance(n, ast.Compare) and len(n.ops) == 1
+                and isinstance(n.ops[0], (ast.Is, ast.IsNot))
+                and isinstance(n.left, ast.Attribute)
+                and isinstance(n.left.value, ast.Name)
+                and n.left.value.id == "self" and n.left.attr == "stream"
+                and any(isinstance(c, ast.Constant) and c.value is None
+                        for c in n.comparators)):
+            return True
+    return False
 
 
 def _is_concrete_subclass(subclass, base_name, tree):
