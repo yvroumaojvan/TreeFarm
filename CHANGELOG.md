@@ -5,6 +5,39 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.11] - 2026-09-08
+
+### 🎯 3DGS 实战三大漏报修复：Kotlin 全链路支持 + HTML 内联 JS 扫描 + 复杂度嗅探
+
+**背景**：用插件实测 3DGS Pro（高斯泼溅相机）源码时实锤三大漏报——旧版只识别
+**1 个 Java 文件**（8 个 Kotlin Activity/引擎全漏、viewer 的 HTML 内联 JS 全漏），
+且 Java 引擎报 **0 个问题**（真实 O(n²) 嵌套循环性能炸弹一个都没抓到，只给
+26 条"重复条件分支"样板噪音）。人工精读同源码抓到 6 处真 bug 形成鲜明对比。
+
+**修复**：
+1. **Kotlin 全链路支持**：`.kt` 进 `CODE_EXTS`；新增 `_kotlin_defs`（fun 函数/
+   class/interface/object/data class/val-var 箭头函数）+ `_strip_kotlin_noise`
+   （含三引号原始字符串）；符号提取/死代码/复杂度/代码异味四链路全部接线；
+   `_count_complexity` 支持 `when` 分支。Kotlin 文件从"完全不可见"变为全功能参与。
+2. **HTML/Vue 内联 JS 参与性能检测**：`_extract_inline_js` 提取 `<script>` 内容，
+   以 `文件#scriptN` 参与分析（`--performance` 自动从 weed 补进 html 文件）。
+3. **复杂度嗅探（非 Python 语言性能规则）**：`_scan_text_perf_issues` 文本级
+   花括号配对定位循环体，嵌套循环（深度≥2）+ 数组下标（含 `arr[i*3]` 运算下标）/
+   集合方法（get/indexOf/contains/includes/find）→ 报「疑似O(n²)嵌套循环+集合访问」；
+   嵌套循环内字符串拼接 → 报 O(n²)。**嵌套组去重**（同一组只报最外层一条）。
+   单层循环零误报。覆盖 Java/Kotlin/JS/TS/Go/C/C++/Rust 八语言。
+
+**实测**（同一 3DGS 靶场）：
+- 扫描文件：1 → **9**（8 个 Kotlin + 1 个 Java）
+- 性能问题：0 → **13**（含引擎 statisticalOutlierFilter 三重循环+grid.get 真实
+  O(n²) 位置、adaptiveSamplePixels 嵌套循环、MeshExporter/ViewerActivity 嵌套循环）
+- `--deep` 跨树共性自动识别「疑似O(n²)嵌套循环+集合访问出现在 4 棵树」=
+  系统级性能缺陷信号（引擎 Java/Kotlin 双版本 + 导出器 + 查看器同一模式）
+
+**测试**：新增 `test_v4911_kt_perf.py`（8 用例：Kotlin 分类/符号、嵌套循环命中、
+单层循环不报、嵌套组去重、HTML 内联 JS 提取与命中）；全量 **524 测试全绿**。
+顺手修了发版遗留：`test_version_bumped` 断言停在 4.9.9（4.9.10 发布时漏改）。
+
 ## [4.9.10] - 2026-09-08
 
 ### 🔧 扣子复测重大缺陷修复：定义形态正则 ReDoS 根治 + 2 条 logic 泛化误报豁免（剑指 S 级）

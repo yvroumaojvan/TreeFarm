@@ -644,9 +644,13 @@ class TreeFarm:
         return "\n".join(lines)
 
     def performance(self) -> str:
-        """性能问题检测（v4.0 新增，--performance）"""
+        """性能问题检测（v4.0 新增，--performance）
+        v4.9.11：HTML/Vue 内联 JS 也参与检测（从 weed 补进文件列表）"""
         from .analysis import detect_performance_issues
-        result = detect_performance_issues(self.scanned["tree"], root=self.root)
+        tree_files = list(self.scanned["tree"])
+        tree_files += [f for f in self.scanned.get("weed", [])
+                       if f.lower().endswith((".html", ".htm", ".vue"))]
+        result = detect_performance_issues(tree_files, root=self.root)
         issues = self._mark_spec_issues(result["issues"])
         sev = result["severity"]
         lines = [self._spec_header().rstrip("\n")]

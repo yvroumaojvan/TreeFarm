@@ -198,6 +198,16 @@ def _strip_java_noise(text: str) -> str:
     return text
 
 
+def _strip_kotlin_noise(text: str) -> str:
+    """去掉 Kotlin 注释与字符串字面量（含三引号原始字符串），替换为空格（v4.9.11）。"""
+    text = re.sub(r"//[^\n]*", " ", text)
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    text = re.sub(r'"""[\s\S]*?"""', " ", text)      # 三引号原始字符串
+    text = re.sub(r"'(?:[^'\\]|\\.)*'", " ", text)   # char 字面量
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', " ", text)
+    return text
+
+
 def _java_def_context(pre: str) -> bool:
     """判断 '(' 前文本是否为方法定义上下文（修饰符/返回类型 + 名字），
     而非调用/控制流（v3.4）。启发式：'(' 前【同一行】内紧邻的最后一个 token：
@@ -626,6 +636,28 @@ def _java_defs(text: str) -> List[Tuple[str, int, int, str]]:
     return out
 
 
+def _kotlin_defs(text: str) -> List[Tuple[str, int, int, str]]:
+    """Kotlin 定义提取：[(name, offset, lineno, kind)]。
+    v4.9.11 新增：类/接口/枚举/数据类/对象 + fun 函数/方法 + val/var 箭头函数。
+    Kotlin 语法与 Java 相近，但用 fun 关键字定义函数（Java 正则不识别）。"""
+    out: List[Tuple[str, int, int, str]] = []
+    for m in re.finditer(r"\b(?:class|interface|enum\s+class|data\s+class|sealed\s+class|object)\s+"
+                         r"([A-Za-z_][\w]*)", text):
+        out.append((m.group(1), m.start(1), _lineno_of(text, m.start(1)), "class"))
+    # fun 函数/方法：fun name( / fun <T> name( / fun Name.name( / fun (A)->B.name(
+    for m in re.finditer(r"\bfun\s+(?:<[^>]+>\s*)?(?:[A-Za-z_][\w<>?, .]*\.)?"
+                         r"([A-Za-z_][\w]*)\s*\(", text):
+        name = m.group(1)
+        if name in JAVA_KEYWORDS:
+            continue
+        out.append((name, m.start(1), _lineno_of(text, m.start(1)), "func"))
+    # val/var 箭头函数：val name = { ... } / val name: T = fun(...) / val name = { a, b -> ... }
+    for m in re.finditer(r"\b(?:val|var)\s+([A-Za-z_][\w]*)\s*(?::[^=\n]*)?=\s*"
+                         r"(?:\{[^}]*\}|fun\s*\([^)]*\)|\([^)]*\)\s*->)", text):
+        out.append((m.group(1), m.start(1), _lineno_of(text, m.start(1)), "func"))
+    return out
+
+
 def _go_defs(text: str) -> List[Tuple[str, int, int, str]]:
     """Go 定义提取：[(name, offset, lineno, kind)]。
     函数（含泛型）/方法（receiver）/类型（struct/interface）。"""
@@ -674,8 +706,8 @@ def _func_body_end(text: str, start: int) -> Optional[int]:
 def _count_complexity(body: str, lang: str) -> int:
     """轻量圈复杂度：1 + 分支/循环/条件关键词 + 逻辑与或 + 三元（JS/Java）。"""
     c = 1
-    if lang in ("js", "java"):
-        c += len(re.findall(r"\b(?:if|for|while|switch|case|catch)\b", body))
+    if lang in ("js", "java", "kt"):
+        c += len(re.findall(r"\b(?:if|for|while|switch|case|catch|when)\b", body))
         c += len(re.findall(r"&&|\|\|", body))
         c += len(re.findall(r"\?[^.?]", body))            # 三元（排除 ?. 可选链 / ?? 空值合并）
     elif lang == "go":

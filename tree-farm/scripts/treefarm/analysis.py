@@ -13,9 +13,9 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from .common import _gram_hashes, read_text
 from .parser import (_count_complexity, _func_body_end, _c_defs, _go_defs, _java_defs,
-                     _js_defs, _lineno_of, _rust_defs,
+                     _js_defs, _kotlin_defs, _lineno_of, _rust_defs,
                      _strip_c_noise, _strip_go_noise, _strip_java_noise,
-                     _strip_js_noise, _strip_rust_noise,
+                     _strip_js_noise, _strip_kotlin_noise, _strip_rust_noise,
                      extract_c_call_graph, extract_go_call_graph,
                      extract_java_call_graph,
                      extract_js_call_graph, extract_rust_call_graph)
@@ -94,6 +94,17 @@ def detect_dead_code(tree_files: List[str]) -> Dict[str, Any]:
             java_calls, java_inherits = extract_java_call_graph(f)
             called.update(c.split(".")[-1] for c in java_calls)
             called.update(re.findall(r"\bnew\s+([A-Za-z_$][\w$]*)\s*\(", clean))  # 类实例化
+            inherited.update(java_inherits)
+        elif ext == ".kt":
+            # v4.9.11：Kotlin 走专属定义提取 + Java 风格调用图（语法相近）
+            clean = _strip_kotlin_noise(text)
+            for name, _, ln, kind in _kotlin_defs(clean):
+                target = all_classes if kind == "class" else all_functions
+                target.setdefault(name, []).append((f, ln))
+            java_calls, java_inherits = extract_java_call_graph(f)
+            called.update(c.split(".")[-1] for c in java_calls)
+            called.update(re.findall(r"\bnew\s+([A-Za-z_$][\w$]*)\s*\(", clean))  # 类实例化
+            called.update(re.findall(r"\bobject\s+([A-Za-z_][\w]*)\s*:", clean))  # object : 接口
             inherited.update(java_inherits)
         elif ext == ".go":
             clean = _strip_go_noise(text)
@@ -459,6 +470,8 @@ def calculate_complexity_any(path: str) -> Optional[Dict[str, Any]]:
         lang, defs_fn, strip_fn = "js", _js_defs, _strip_js_noise
     elif ext == ".java":
         lang, defs_fn, strip_fn = "java", _java_defs, _strip_java_noise
+    elif ext == ".kt":
+        lang, defs_fn, strip_fn = "kt", _kotlin_defs, _strip_kotlin_noise
     elif ext == ".go":
         lang, defs_fn, strip_fn = "go", _go_defs, _strip_go_noise
     elif ext == ".rs":
@@ -689,6 +702,8 @@ def _heuristic_smells(text: str, path: str, root: Optional[str], ext: str,
         lang, defs_fn, strip_fn = "js", _js_defs, _strip_js_noise
     elif ext == ".java":
         lang, defs_fn, strip_fn = "java", _java_defs, _strip_java_noise
+    elif ext == ".kt":
+        lang, defs_fn, strip_fn = "kt", _kotlin_defs, _strip_kotlin_noise
     elif ext == ".go":
         lang, defs_fn, strip_fn = "go", _go_defs, _strip_go_noise
     elif ext == ".rs":
@@ -2716,6 +2731,89 @@ def _perf_suggestions(sev: Dict[str, int], total: int) -> List[str]:
     return s
 
 
+def _extract_inline_js(lines: List[str]) -> List[str]:
+    """提取 HTML/Vue 里的内联 <script> 内容（v4.9.11，让前端 JS 参与性能检测）。"""
+    text = "".join(lines)
+    parts = re.findall(r"<script(?:\s[^>]*)?>([\s\S]*?)</script>", text, re.I)
+    return [p for p in parts if p.strip()]
+
+
+# v4.9.11 复杂度嗅探：嵌套循环 + 集合/数组访问 → O(n²) 提示。
+# 背景：3DGS 实战漏报实锤——引擎 statisticalOutlierFilter 三重循环 + grid.get/桶遍历，
+# 以及 adaptiveSamplePixels 的嵌套循环，都是真实 O(n²) 性能炸弹，但旧规则只查 Python AST。
+_LOOP_HEAD_RE = re.compile(r"\b(?:for|while)\b")
+# 变量下标访问：arr[i] / arr[i * 3] / arr[j + 1]（常量下标 arr[0] 不报）
+_INDEX_ACCESS_RE = re.compile(r"\[[A-Za-z_][\w]*(?:\s*[+\-*/%]\s*[A-Za-z_\d.]+)?\]")
+_COLL_CALL_RE = re.compile(r"\.(?:get|indexOf|lastIndexOf|contains|includes|find|search)\s*\(")
+_STR_CONCAT_RE = re.compile(r"[A-Za-z_][\w]*\s*\+=")          # s += x
+_STR_CONCAT2_RE = re.compile(r"=\s*[A-Za-z_][\w]*\s*\+")      # s = s + x
+
+
+def _scan_text_perf_issues(lines: List[str], rel: str) -> List[Dict[str, Any]]:
+    """文本级复杂度嗅探（非 Python 语言）：花括号深度配对定位循环体，
+    嵌套循环（深度≥2）+ 体内数组下标/集合方法/字符串拼接 → 报疑似 O(n²)。
+    .html 内联 JS 由调用方提取后以 rel#scriptN 传入。"""
+    issues: List[Dict[str, Any]] = []
+    n = len(lines)
+
+    def _strip_comment(raw: str) -> str:
+        return raw.split("//")[0]
+
+    # 第一遍：逐行 brace 深度（循环体边界用）
+    depths = [0] * (n + 1)
+    d = 0
+    for i, raw in enumerate(lines, 1):
+        code = _strip_comment(raw)
+        d += code.count("{") - code.count("}")
+        depths[i] = d
+
+    # 找循环头 + 循环体结束行
+    loops: List[Tuple[int, int, int]] = []   # (start_line, body_end_line, start_depth)
+    for i, raw in enumerate(lines, 1):
+        code = _strip_comment(raw)
+        if not _LOOP_HEAD_RE.search(code):
+            continue
+        depth_before = depths[i] - code.count("{") + code.count("}")
+        end = n
+        for j in range(i + 1, n + 1):
+            if depths[j] <= depth_before:
+                end = j - 1
+                break
+        loops.append((i, end, depth_before))
+
+    for start, end, sd in loops:
+        if end <= start:
+            continue
+        inner = [l for l, _, _ in loops if start < l <= end]
+        if not inner:
+            continue
+        # 去重：只报"最外层"嵌套循环（自己也在别的循环体内的一律跳过），
+        # 避免同一组嵌套循环（外层 for → 内层 dx/dy/dz → 桶内 for）刷出 3~4 条噪音
+        in_other = any(s < start <= e for s, e, _ in loops if start != s)
+        if in_other:
+            continue
+        body = "\n".join(lines[start:end])
+        has_coll = bool(_INDEX_ACCESS_RE.search(body) or _COLL_CALL_RE.search(body))
+        has_concat = bool(_STR_CONCAT_RE.search(body) or _STR_CONCAT2_RE.search(body))
+        if has_coll:
+            issues.append({
+                "file": rel, "line": start, "type": "疑似O(n²)嵌套循环+集合访问",
+                "severity": "medium",
+                "desc": f"循环体内嵌套 {len(inner)} 层循环且访问数组/集合（下标或 get/indexOf/contains），"
+                        f"大数据量下复杂度可能到 O(n²)，建议换哈希索引/空间索引/提前排序（需人工确认）",
+                "code": lines[start - 1].strip()[:100],
+            })
+        elif has_concat:
+            issues.append({
+                "file": rel, "line": start, "type": "嵌套循环内字符串拼接",
+                "severity": "medium",
+                "desc": f"嵌套循环内字符串拼接（+= 或 s = s + x），不可变字符串下 O(n²)，"
+                        f"建议用 StringBuilder/数组收集后 join（需人工确认）",
+                "code": lines[start - 1].strip()[:100],
+            })
+    return issues
+
+
 def detect_performance_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
     """检测性能问题（v4.5 AST 重写，v4.6 加资源泄漏）：循环内字符串拼接 / 循环内线性查找(O(n²)) /
     循环内 re.compile / N+1 查询 / 递归无终止 / open/socket 资源泄漏。
@@ -2728,6 +2826,28 @@ def detect_performance_issues(tree_files: List[str], root: Optional[str] = None)
         vis = _PerfVisitor(lines, rel)
         vis.visit(tree)
         issues.extend(vis.issues)
+
+    # v4.9.11：非 Python 语言的复杂度嗅探（文本级，覆盖 Java/Kotlin/JS/TS/Go/C/C++/Rust）
+    #  + HTML/Vue 内联 <script> 提取参与 JS 检测（修复前端 JS 完全漏扫）。
+    # 背景：3DGS 实战漏报——引擎 O(n²) 嵌套循环+集合访问在旧版 0 命中。
+    _TEXT_PERF_EXTS = {".java", ".kt", ".js", ".ts", ".go", ".c", ".h", ".cpp", ".rs",
+                       ".html", ".htm", ".vue"}
+    for fpath in tree_files:
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext not in _TEXT_PERF_EXTS:
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                text_lines = fh.readlines()
+        except Exception:
+            continue
+        rel = os.path.relpath(fpath, root) if root else fpath
+        if ext in (".html", ".htm", ".vue"):
+            scripts = _extract_inline_js(text_lines)
+            for si, js in enumerate(scripts):
+                issues.extend(_scan_text_perf_issues(js.splitlines(), f"{rel}#script{si + 1}"))
+        else:
+            issues.extend(_scan_text_perf_issues(text_lines, rel))
 
     severity_count = {"high": 0, "medium": 0, "low": 0}
     for i in issues:

@@ -19,7 +19,7 @@ log = logging.getLogger("treefarm")
 # ========== 配置常量（魔法数字全部收编于此） ==========
 WEED_EXTS = {".json", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".xml",
              ".yml", ".yaml", ".html", ".css", ".svg", ".csv", ".ini"}
-CODE_EXTS = {".py", ".js", ".ts", ".java", ".c", ".h", ".cpp", ".go", ".rs"}
+CODE_EXTS = {".py", ".js", ".ts", ".java", ".kt", ".c", ".h", ".cpp", ".go", ".rs"}
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "build", "dist", ".idea", ".vscode"}
 
 SMALL_TREE_RATIO = 0.10          # 小树激活阈值：基因数 / 核心文件数
@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.10"               # 工具版本（v4.9.10：扣子复测定义形态正则 ReDoS 修复——[^;{}]* 单行化+量词有界 tgmath.h 类头文件 15.45s→0.54s；2 条 logic 泛化误报豁免：get→del 保护分支/stream None 保护；516 测试全绿）
+VERSION = "4.9.11"               # 工具版本（v4.9.11：3DGS 实战三大漏报修复——①Kotlin 支持（.kt 进 CODE_EXTS/符号/基因/复杂度/异味全链路）；②HTML/Vue 内联 JS 提取参与性能检测；③复杂度嗅探（嵌套循环+集合访问→疑似 O(n²)，含嵌套组去重）；524 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -369,6 +369,13 @@ class FileCache:
                                      r"\s*(?:throws\s+[\w.,\s]+)?[;{]", text):
                     if m.group(1) not in JAVA_KEYWORDS:
                         syms.append(m.group(1))
+            # v4.9.11：Kotlin 函数/类符号（fun Name( / class|object Name / val x = {...}）
+            if path.endswith(".kt"):
+                syms += re.findall(r"\bfun\s+(?:<[^>]+>\s*)?(?:[A-Za-z_][\w<>?, .]*\.)?"
+                                   r"([A-Za-z_][\w]*)\s*\(", text)
+                syms += re.findall(r"\b(?:class|interface|object)\s+([A-Za-z_][\w]*)", text)
+                syms += re.findall(r"\b(?:val|var)\s+([A-Za-z_][\w]*)\s*(?::[^=\n]*)?=\s*"
+                                   r"(?:\{[^}]*\}|fun\s*\([^)]*\)|\([^)]*\)\s*->)", text)
             # v3.5：Go 函数/方法/类型符号（func Name( / func (r *T) Name( / type Name struct|interface）
             if path.endswith(".go"):
                 syms += re.findall(r"\bfunc\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\(", text)
