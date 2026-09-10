@@ -1344,8 +1344,14 @@ def _scan_c_security(lines, issues, severity_count, rel):
     3) strcpy/strcat 第二参动态：缓冲区溢出风险（建议 strncpy/strncat）
     4) sprintf 无边界格式化：建议 snprintf（含动态格式 %s 时高危，纯字面量提示）
     5) scanf/fscanf "%s" 无边界读取
-    6) 硬编码密钥（char *api_key = "..." 形态）
+    6) 硬编码密钥（char *api_key / char *secret 形态，v4.9.12 扩展变量名集）
+    v4.9.12：收集 #define 宏名，strcpy/strcat 第二参若是宏名视为常量（不报）
     """
+    macro_names = set()
+    for raw in lines:
+        m = re.match(r"\s*#\s*define\s+([A-Za-z_]\w*)", raw)
+        if m:
+            macro_names.add(m.group(1))
     for i, line in enumerate(lines, 1):
         if len(line) > 32768:
             line = line[:32768]  # v4.9.2 行长护栏防 ReDoS
@@ -1353,8 +1359,8 @@ def _scan_c_security(lines, issues, severity_count, rel):
         if not stripped or stripped.startswith(("//", "*", "/*", "#")):
             continue
 
-        # 0) 硬编码密钥/口令
-        if re.search(r'''\b(?:api_key|apikey|api_token|access_key|secret_key|secret_token|password|passwd)\b\s*=\s*["'][^"']{8,}["']''', line):
+        # 0) 硬编码密钥/口令（v4.9.12：变量名集合扩展 secret/token/credential 等）
+        if re.search(r'''\b(?:api_key|apikey|api_token|access_key|secret_key|secret_token|auth_token|access_token|password|passwd|secret|token|credential|credentials)\b\s*=\s*["'][^"']{8,}["']''', line):
             issues.append({"file": rel, "line": i, "type": "硬编码凭据",
                            "severity": "high",
                            "desc": "硬编码密钥/口令：泄露即被利用，建议改为环境变量/配置注入",
@@ -1391,6 +1397,10 @@ def _scan_c_security(lines, issues, severity_count, rel):
             parts = args.split(",")
             second = parts[1] if len(parts) > 1 else ""
             rest = re.sub(r'"[^"]*"', '', second)
+            rest2 = rest.strip()
+            # v4.9.12：第二参是 #define 宏名 → 视为常量（strcpy(dst, MAX_PATH) 不报）
+            if rest2 and re.fullmatch(r'[A-Za-z_]\w*', rest2) and rest2 in macro_names:
+                continue
             if rest.strip():
                 issues.append({"file": rel, "line": i, "type": "缓冲区溢出",
                                "severity": "high",
@@ -1576,7 +1586,18 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 if re.search(r'''["']pattern["']\s*:\s*["']''', line):
                     continue
             # v4.9.2：跳过 Python 正则字面量行（r'…' / r"…"，规则库文件防自我误报）
-            if re.search(r'''\br(?=["'])''', line):
+            # v4.9.14 修复：旧逻辑一刀切跳过所有含 r" 的行 → re.compile(r"(a+)+") 等
+            # 真实用户代码的正则全被跳过，ReDoS 检测形同虚设。收窄为「规则库 pattern 键」
+            # 形态（pattern: r"…"）才跳过，普通 raw 字符串行恢复正常检测。
+            if re.search(r'''["']pattern["']\s*:\s*(?:r|R)?["']''', line):
+                continue
+            # v4.9.15：规则库「元组定义行」也跳过——Dogfooding 实锤：analysis.py 自身的
+            # XSS 规则 (r'''\|[\s]*safe\b''', "XSS:...") 被 XSS 检测自报、XXE 规则
+            # (r'''(no_network|load_dtd|...)=False''') 被 XXE 检测自报。
+            # 特征：含三引号 raw 字符串 + 逗号 + 字符串 desc，且非 re. 调用（re.sub 等
+            # 用户代码仍正常检测）
+            if (("r'''" in line or 'r"""' in line)
+                    and re.search(r''',\s*['"]''', line) and "re." not in line):
                 continue
 
             # 1. SQL注入检测
@@ -1822,7 +1843,8 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                         break
 
             # 6.12 ReDoS增强检测（v4.2新增，v4.5收紧：只认真正的嵌套量词）
-            if re.search(r'''re\.(compile|match|search|findall|fullmatch)''', line):
+            # v4.9.16：覆盖补全 re.sub/finditer/split（同样接收模式串，吃灾难性回溯）
+            if re.search(r'''re\.(compile|match|search|findall|fullmatch|sub|finditer|split)''', line):
                 # 真正的灾难性回溯：捕获组内已含量词，组外再跟量词，如 (a+)+ (a*)* (a+)*
                 # 排除非捕获组 (?:...)* —— 内部是固定字符+量词，属有界回溯
                 if re.search(r'''\((?![?:?=!<])[^()]*?[+*]\s*\)\s*[+*]''', line):
@@ -2612,6 +2634,60 @@ class _PerfVisitor(ast.NodeVisitor):
                 self._add(node.lineno, "循环内正则编译", "medium",
                           "循环内重复调用 re.compile()，正则每次编译，建议提到循环外复用")
         self.generic_visit(node)
+
+    # ---- v4.9.12：嵌套循环复杂度嗅探（补 Python AST 缺口，对齐文本语言版）----
+    # 背景：v4.9.11 的"嵌套循环+集合访问→疑似O(n²)"只在文本级扫描（Kotlin/JS/C 等
+    # 花括号语言），Python 走 AST 路径被漏掉。此处补上：只报最外层循环（去重）。
+    _COLL_ATTRS = {"get", "index", "count", "find", "indexOf", "lastIndexOf",
+                   "contains", "includes", "search"}
+
+    def _body_has_collection_access(self, node):
+        """循环体内是否有数组下标/集合方法访问（常量下标 arr[0] 不计）。"""
+        for child in ast.walk(node):
+            if isinstance(child, ast.Subscript):
+                if not isinstance(child.slice, ast.Constant):
+                    return True
+            elif isinstance(child, ast.Call):
+                f = child.func
+                if isinstance(f, ast.Attribute) and f.attr in self._COLL_ATTRS:
+                    return True
+        return False
+
+    # 第2轮扩展：推导式也纳入迭代上下文（[[... for j] for i] 双层是常见 O(n²)，
+    # ast.ListComp 不是 ast.For，第1轮补丁漏掉）
+    _ITER_TYPES = (ast.For, ast.While, ast.AsyncFor, ast.ListComp,
+                   ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+    def _visit_iter(self, node):
+        if not any(isinstance(p, self._ITER_TYPES) for p in self._anc):
+            nested = any(c is not node and isinstance(c, self._ITER_TYPES)
+                         for c in ast.walk(node))
+            if nested and self._body_has_collection_access(node):
+                self._add(node.lineno, "疑似O(n²)嵌套循环+集合访问", "medium",
+                          "循环（或推导式）内嵌套迭代且访问数组/集合（下标或 get/index/contains），"
+                          "大数据量下复杂度可能到 O(n²)，建议换哈希索引/空间索引/提前排序（需人工确认）")
+        self.generic_visit(node)
+
+    def visit_For(self, node):
+        self._visit_iter(node)
+
+    def visit_While(self, node):
+        self._visit_iter(node)
+
+    def visit_AsyncFor(self, node):
+        self._visit_iter(node)
+
+    def visit_ListComp(self, node):
+        self._visit_iter(node)
+
+    def visit_SetComp(self, node):
+        self._visit_iter(node)
+
+    def visit_DictComp(self, node):
+        self._visit_iter(node)
+
+    def visit_GeneratorExp(self, node):
+        self._visit_iter(node)
 
     # ---- v4.6：资源泄漏检测（open/socket 未用 with 且函数内无 close()） ----
     def _check_resource_leaks(self, node):

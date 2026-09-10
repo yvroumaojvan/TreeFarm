@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.11"               # 工具版本（v4.9.11：3DGS 实战三大漏报修复——①Kotlin 支持（.kt 进 CODE_EXTS/符号/基因/复杂度/异味全链路）；②HTML/Vue 内联 JS 提取参与性能检测；③复杂度嗅探（嵌套循环+集合访问→疑似 O(n²)，含嵌套组去重）；524 测试全绿）
+VERSION = "4.9.16"               # 工具版本（v4.9.16：第5轮自测——ReDoS 定义形态检测覆盖补全：re.sub/finditer/split 纳入嵌套量词检测（此前只认 compile/match/search/findall/fullmatch）；553 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
