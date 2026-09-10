@@ -3569,18 +3569,23 @@ def _collect_self_attr_calls(func):
 
 
 def _has_stream_none_guard(method):
-    """方法体内是否对 self.stream 做了空值感知（self.stream is None / is not None 比较）。
+    """方法体内是否对 self.stream 做了空值感知（if self.stream is None / is not None 保护）。
     v4.9.10：tornado send_error 场景有 if self.stream is None: 保护分支，调用前已
-    确认非 None，不是「委托对象不一致」bug → 委托一致性规则豁免。"""
+    确认非 None，不是「委托对象不一致」bug → 委托一致性规则豁免。
+    v4.9.17：仅认 if 条件里的空值比较（安全惯用法）；assert self.stream is not None
+    属防御性断言，恰恰暴露 stream 可能为 None 的委托不一致（tornado#1 回归），不豁免。"""
     for n in ast.walk(method):
-        if (isinstance(n, ast.Compare) and len(n.ops) == 1
-                and isinstance(n.ops[0], (ast.Is, ast.IsNot))
-                and isinstance(n.left, ast.Attribute)
-                and isinstance(n.left.value, ast.Name)
-                and n.left.value.id == "self" and n.left.attr == "stream"
-                and any(isinstance(c, ast.Constant) and c.value is None
-                        for c in n.comparators)):
-            return True
+        if not isinstance(n, ast.If):
+            continue
+        for c in ast.walk(n.test):
+            if (isinstance(c, ast.Compare) and len(c.ops) == 1
+                    and isinstance(c.ops[0], (ast.Is, ast.IsNot))
+                    and isinstance(c.left, ast.Attribute)
+                    and isinstance(c.left.value, ast.Name)
+                    and c.left.value.id == "self" and c.left.attr == "stream"
+                    and any(isinstance(cc, ast.Constant) and cc.value is None
+                            for cc in c.comparators)):
+                return True
     return False
 
 

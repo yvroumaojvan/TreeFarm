@@ -5,6 +5,26 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.17] - 2026-09-10
+
+### 🐛 API契约 stream 豁免回归修复（tornado#1 恢复命中）
+
+**背景**：扣子AI 复测 v4.9.10 报告发现——v4.9.10 为消除 tornado 6.1 send_error
+误报新增的 `_has_stream_none_guard` 豁免规则过于宽泛：`assert self.stream is not None`
+（防御性断言，恰恰暴露委托不一致 bug）被误判为「空值保护」→ tornado#1
+（set_nodelay 委托对象不一致）真 bug 整方法豁免 → **从 v4.9.10 一路漏报到 v4.9.16**。
+
+**修复**：豁免规则仅认 `if` 条件里的 `self.stream is None / is not None` 比较
+（安全惯用法）；`assert` 防御性断言不再豁免。
+
+**验证**：`benchmark_bugs/buggy_1`（tornado#1 最小复现）`--logic` 恢复命中
+`[API契约]`（风险分 12/100 B，含修复建议）；**555 测试全绿**（+2 回归用例：
+assert 场景必报 + if/assert 混合按方法粒度豁免）。
+
+**附**：v4.9.12~v4.9.16 为 09-10 五轮自测交付（Python 嵌套循环嗅探补齐 /
+推导式纳入嗅探 / ReDoS 检测失效根因修复 / Dogfooding 规则库自误报 /
+ReDoS 覆盖补全 re.sub/finditer/split），553 测试全绿，详见各轮金标准报告。
+
 ## [4.9.11] - 2026-09-08
 
 ### 🎯 3DGS 实战三大漏报修复：Kotlin 全链路支持 + HTML 内联 JS 扫描 + 复杂度嗅探

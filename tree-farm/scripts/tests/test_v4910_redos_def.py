@@ -229,6 +229,53 @@ class LogicFPReliefTest(unittest.TestCase):
         self.assertIn("API契约", types, "无保护 stream 委托仍应报")
         self.assertEqual(types.count("API契约"), 1, "只应报 set_nodelay 一条，实际 %s" % types)
 
+    def test_assert_stream_delegate_still_reported(self):
+        # v4.9.17 回归修复（扣子复测发现）：tornado#1 真实写法
+        # `assert self.stream is not None` 是防御性断言，恰恰暴露 stream 可能为 None，
+        # 不属于 if 空值保护惯用法 → API契约 必须仍报（此前被 _has_stream_none_guard 误豁免）
+        src = (
+            "class WS:\n"
+            "    def __init__(self):\n"
+            "        self.stream = None\n"
+            "        self.ws_connection = None\n"
+            "    def write_message(self, x):\n"
+            "        return self.ws_connection.write_message(x)\n"
+            "    def close(self):\n"
+            "        return self.ws_connection.close()\n"
+            "    def ping(self, x):\n"
+            "        return self.ws_connection.ping(x)\n"
+            "    def set_nodelay(self, x):\n"
+            "        assert self.stream is not None\n"
+            "        return self.stream.set_nodelay(x)\n"
+        )
+        types = self._logic_issues(src)
+        self.assertIn("API契约", types, "assert 防御性断言不应豁免 API契约（tornado#1 回归）")
+
+    def test_assert_and_if_mixed_only_relieves_if_guarded(self):
+        # 同一类里：send_error（if 保护）不报、set_nodelay（assert 防御断言）仍报——只豁免 if 惯用法
+        src = (
+            "class WS:\n"
+            "    def __init__(self):\n"
+            "        self.stream = None\n"
+            "        self.ws_connection = None\n"
+            "    def write_message(self, x):\n"
+            "        return self.ws_connection.write_message(x)\n"
+            "    def close(self):\n"
+            "        return self.ws_connection.close()\n"
+            "    def ping(self, x):\n"
+            "        return self.ws_connection.ping(x)\n"
+            "    def send_error(self, x):\n"
+            "        if self.stream is None:\n"
+            "            return super().send_error(x)\n"
+            "        return self.stream.write(x)\n"
+            "    def set_nodelay(self, x):\n"
+            "        assert self.stream is not None\n"
+            "        return self.stream.set_nodelay(x)\n"
+        )
+        types = self._logic_issues(src)
+        self.assertIn("API契约", types, "assert 防御断言场景 API契约 应报")
+        self.assertEqual(types.count("API契约"), 1, "只应报 set_nodelay 一条，实际 %s" % types)
+
 
 if __name__ == "__main__":
     unittest.main()
