@@ -1142,6 +1142,16 @@ def calculate_debt(tree_files: List[str], bank: Any, module_map: Dict[str, str],
 # Java 安全规则（v4.8.3 新增，零依赖启发式，需人工确认）
 # ============================================================
 
+try:
+    from .java_extra_rules import _scan_java_extra_security, _scan_java_extra_file_level
+except Exception:
+    _scan_java_extra_security = None
+try:
+    from .js_extra_rules import _scan_js_extra_security, _scan_js_extra_file_level
+except Exception:
+    _scan_js_extra_security = None
+
+
 def _scan_java_security(lines, issues, severity_count, rel):
     """Java 启发式安全规则：
     1) 命令执行入口：ProcessBuilder / Runtime.exec 参数含动态成分（变量/拼接/调用）
@@ -1161,8 +1171,17 @@ def _scan_java_security(lines, issues, severity_count, rel):
         for m in re.finditer(
                 r'''(?:new\s+ProcessBuilder|Runtime\.getRuntime\(\)\.exec)\s*\(([^)]*)\)''',
                 line):
+            # r2：命中位置在字符串字面量内（帮助文案 "Runtime.getRuntime().exec(cmd)"）→ 非执行代码
+            if _in_string_literal(line, m.start()):
+                continue
             args = m.group(1)
             rest = re.sub(r'"[^"]*"', '', args)
+            # r9：new String[]{"su","-c","id"} 纯字面量数组 → 全是常量，无动态成分，不报
+            # （NetBell RootKeeper 实测误报源：去掉引号后剩 new/String/[]{}, 等关键字）
+            if re.search(r'''new\s+String\s*\[\s*\]''', args):
+                stripped_rest = re.sub(r'''new\s+String\s*\[\s*\]\s*\{|[\{\}\[\],\s]''', '', rest)
+                if not re.search(r'[a-zA-Z_]\w*', stripped_rest):
+                    continue
             if re.search(r'[a-zA-Z_]\w*|\+', rest):
                 issues.append({
                     "file": rel, "line": i, "type": "命令执行",
@@ -1210,8 +1229,8 @@ def _scan_java_security(lines, issues, severity_count, rel):
                 "code": stripped[:100]})
             severity_count["medium"] += 1
 
-        # 5) 硬编码 API Key（sk- 前缀的长字符串字面量）
-        if re.search(r'''["']sk-[A-Za-z0-9_\-]{12,}["']''', line):
+        # 5) 硬编码 API Key（sk- / sk_ 前缀的长字符串字面量，r18：Stripe 真实格式 sk_live_）
+        if re.search(r'''["']sk[_-][A-Za-z0-9_\-]{12,}["']''', line):
             issues.append({
                 "file": rel, "line": i, "type": "硬编码密钥",
                 "severity": "high",
@@ -1462,6 +1481,10 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
         ext = os.path.splitext(fpath)[1].lower()
         if ext not in _SECURITY_EXTS:
             continue
+        # r10：压缩第三方库（*.min.js）跳过——构建产物一行数万字符，污点收集
+        # 极易误报（3DGS three.min.js 实测：跨行污点命令注入/SSRF 假命中）
+        if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs") and fpath.endswith(".min.js"):
+            continue
         try:
             with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                 lines = fh.readlines()
@@ -1474,14 +1497,25 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
         # v4.8.3：Java 文件走专用启发式安全规则，跳过下方 Python 语法规则
         if ext == ".java":
             _scan_java_security(lines, issues, severity_count, rel)
+            if _scan_java_extra_security:
+                _scan_java_extra_security(lines, issues, severity_count, rel)
             # v4.9.0：文件级弱信号（黑名单 contains 反模式）
             _scan_java_file_level(lines, issues, severity_count, rel)
+            if _scan_java_extra_security:
+                _scan_java_extra_file_level(lines, issues, severity_count, rel)
             continue
 
         # v4.9.8：C/C++ 文件走专用启发式安全规则（system/popen/gets/strcpy/sprintf）
         if ext in (".c", ".h", ".cpp"):
             _scan_c_security(lines, issues, severity_count, rel)
             continue
+
+        # v4.9.19：JS/TS 文件叠加 JS 补充规则（命令注入/路径/SSRF/原型污染/ReDoS/动态执行/XSS）
+        if ext in (".js", ".jsx", ".ts", ".tsx", ".mjs"):
+            if _scan_js_extra_security:
+                _scan_js_extra_security(lines, issues, severity_count, rel)
+            if _scan_js_extra_file_level:
+                _scan_js_extra_file_level(lines, issues, severity_count, rel)
 
         # v4.5 新增：污点变量收集（轻量级跨行数据流跟踪）
         # 识别「用户输入源 → 变量赋值」的传播链，解决单行正则检测不到跨行数据流的问题
@@ -1521,6 +1555,14 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
         file_from_imports[rel] = from_imports
         file_lines_cache[rel] = lines
 
+        # r1：eval/exec 别名收集（e = eval / e = exec / x = __import__）——
+        # 混淆对抗：静态分析最常见被绕过的形态，别名后的调用等价于直接调用。
+        dyn_aliases: Dict[str, str] = {}
+        for ln in lines:
+            ma = re.match(r'''^\s*(\w+)\s*=\s*((?:__import__|eval|exec))\b''', ln)
+            if ma:
+                dyn_aliases[ma.group(1)] = ma.group(2)
+
         # 函数参数 → param 弱污点（外部调用者可能传用户值，但需拼接/传播才升级为可报）
         # v4.9.5：同时记录 函数名→参数表（跨文件污点第二阶段按位置/名字注入）
         func_params = {}
@@ -1559,10 +1601,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             if m2 and m2.group(2) in tainted_vars:
                 _mark_taint(m2.group(1), tainted_vars[m2.group(2)])
             # 污点传播（拼接赋值）：x = "..." + y  或  x = f"...{y}..."（右边表达式含污点变量 y）
+            # r1：补 .format( 拼接（"..{}..".format(污点)）与 os.path.join（路径传播）
             m3 = re.search(r'''(\w{1,64})\s*=\s*(.+)$''', ln)
             if m3 and len(m3.group(2)) <= 8192:  # v4.9.2：超长右值跳过（避免 in 大串）
                 lhs, rhs = m3.group(1), m3.group(2)
-                if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))):
+                if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))
+                        or ".format(" in rhs or "os.path.join" in rhs):
                     hits = [v for v in tainted_vars if v in rhs]
                     if hits:
                         # 拼接传播：操作数含 user 则升级 user，否则 concat（拼接本身即注入形态）
@@ -1573,12 +1617,15 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             cross_calls.extend(_collect_cross_calls(lines, imports, tainted_vars, rel,
                                                     from_imports))
 
+        # r5：三引号字符串（docstring）区域标记——文档语义不执行，行级规则整行跳过
+        multi_str_lines = _find_multiline_string_lines(lines)
+
         for i, line in enumerate(lines, 1):
             # v4.9.2 行长护栏：超长行截断到 32KB（防正则灾难性回溯，检测能力不受影响）
             if len(line) > 32768:
                 line = line[:32768]
             stripped = line.strip()
-            if stripped.startswith("#"):
+            if stripped.startswith("#") or (i - 1) in multi_str_lines:
                 continue
             # v4.5 改进：跳过安全规则库定义行（如 pattern_matcher.py 的 "pattern": "os.system($CMD)"，
             # 这类字符串是用于检测别人代码的"漏洞模式"，不是插件自身的漏洞）
@@ -1638,6 +1685,9 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "命令注入：subprocess字符串拼接命令"),
             ]
             for pattern, desc in cmd_patterns:
+                # r1：os.system( 字样位于字符串字面量内（文档/帮助文案）→ 非执行代码，跳过
+                if not _match_outside_string(line, pattern):
+                    continue
                 if re.search(pattern, line):
                     issues.append({"file": rel, "line": i, "type": "命令注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
@@ -1647,11 +1697,26 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             # 3. 路径遍历检测
             path_patterns = [
                 (r'''(?<!def\s)(?<![\w.])\bopen\s*\(\s*[^"'].*?\+''', "路径遍历：open接收拼接路径"),
+                (r'''\bopen\s*\(\s*["'][^"']*["']\s*\+''', "路径遍历：open字符串前缀拼接变量"),
                 (r'''open\s*\(\s*request\.''', "路径遍历：open接收用户输入"),
-                (r'''os\.path\.join\s*\([^)]*request\.''', "路径遍历：路径拼接用户输入"),
+                (r'''os\.path\.join\s*\([^)]*(request|input|argv|args|getenv)''', "路径遍历：join拼接用户输入"),
+                (r'''os\.path\.join\s*\([^)]*,\s*(input|request|fname|name|path|filename|file_name|filepath)\s*\)''', "路径遍历：join拼接常见用户输入变量（需人工确认）"),
+                (r'''shutil\.copyfile\s*\(\s*[^"']\w+\s*,\s*''', "路径遍历：copyfile变量源路径（需人工确认）"),
+                (r'''\b(?:open|remove|unlink|rmtree)\s*\([^"']\w+[^)]*\+''', "路径遍历：文件操作拼接路径"),
+                (r'''\b(?:remove|unlink|rmtree|shutil\.copyfile)\s*\(\s*["'][^"']*["']\s*\+''', "路径遍历：删除/复制字符串前缀拼接变量"),
+                # r1：tarfile 从变量名黑名单升级为「非字面量参数即报」——
+                # tarfile.open(archive) 中 archive 是函数参数/变量，调用方可控即
+                # 可传任意路径（旧规则只认 input/request/argv/args 名字，漏 fname/
+                # archive/path 等常见变量）。与 os.system 的 [^"'] 变量直传形态对齐。
+                (r'''tarfile\.open\s*\(\s*[^"']''', "路径遍历：tarfile打开用户文件（变量路径）"),
+                (r'''tarfile\.open\s*\(\s*["'][^"']*["']\s*\+''', "路径遍历：tarfile字符串拼接路径"),
+                (r'''shutil\.copyfile\s*\([^)]*(input|request)\s*,\s*''', "路径遍历：copyfile用户源"),
                 (r'''send_file\s*\(\s*[^"']''', "路径遍历：send_file接收变量"),
             ]
             for pattern, desc in path_patterns:
+                # r1：字符串字面量里的 open(/tarfile.open( 字样（帮助文案）→ 跳过
+                if not _match_outside_string(line, pattern):
+                    continue
                 if re.search(pattern, line):
                     issues.append({"file": rel, "line": i, "type": "路径遍历",
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
@@ -1667,8 +1732,36 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''marshal\.loads?\s*\(''', "不安全反序列化：marshal.loads"),
             ]
             for pattern, desc in deser_patterns:
+                # r5：字符串字面量里的 pickle.loads(/yaml.load( 字样（文档/示例）→ 跳过
+                if not _match_outside_string(line, pattern):
+                    continue
                 if re.search(pattern, line):
                     issues.append({"file": rel, "line": i, "type": "不安全反序列化",
+                                   "severity": "critical", "desc": desc, "code": stripped[:100]})
+                    severity_count["critical"] += 1
+                    break
+
+            # 4.5 动态执行检测（eval/exec/compile+exec：OWASP 代码注入必查）
+            # r1：eval/exec 别名形态（e = eval; e(code)）——先在同一文件里收集
+            # 别名映射（文件级预扫，见文件循环开头 dyn_aliases），此处把「别名(」
+            # 的调用识别为对应危险函数（只认实参为变量/表达式，纯字符串不报）
+            dyn_patterns = [
+                (r'''\beval\s*\(\s*(?!["']\s*\))[^"']''', "动态执行：eval(变量表达式)"),
+                (r'''\bexec\s*\(\s*(?!["']\s*\))[^"']''', "动态执行：exec(变量代码)"),
+                (r'''\bcompile\s*\([^)]*\).{0,200}?\bexec\s*\(''', "动态执行：compile+exec组合"),
+                (r'''\b__import__\s*\(\s*[^"']''', "动态执行：__import__动态导入"),
+            ]
+            if dyn_aliases:
+                for alias_name, real_func in dyn_aliases.items():
+                    dyn_patterns.append(
+                        (r'''(?<![\w.])''' + re.escape(alias_name)
+                         + r'''\s*\(\s*(?!["']\s*\))[^"']''',
+                         f"动态执行：{real_func}别名 {alias_name}() 执行动态代码"))
+            for pattern, desc in dyn_patterns:
+                if not _match_outside_string(line, pattern):
+                    continue
+                if re.search(pattern, line):
+                    issues.append({"file": rel, "line": i, "type": "动态执行",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
                     break
@@ -1889,11 +1982,22 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''insertAdjacentHTML\s*\(\s*''', "XSS：insertAdjacentHTML 插入 HTML"),
                 (r'''v-html\s*=\s*["']''', "XSS：Vue v-html 渲染（仅可用于可信内容）"),
                 (r'''dangerouslySetInnerHTML\s*=\s*''', "XSS：React dangerouslySetInnerHTML（仅可用于可信内容）"),
+                (r'''["\'][^"\']*</?[a-zA-Z][^"\']*["\']\s*\+''', "XSS：字符串拼接HTML标签（用户输入需转义）"),
+                (r'''(?:html|out|output|response|content)\s*=\s*["\'][^"\']*</[a-zA-Z][^"\']*["\']\s*\+''', "XSS：HTML模板字符串拼接"),
                 (r'''\|[\s]*safe\b''', "XSS：Jinja2 |safe 过滤器输出未转义内容"),
                 (r'''style=["']text/html["'][^>]*srcdoc''', "XSS：iframe srcdoc 注入 HTML"),
+                (r'''["'][^"']*<[a-zA-Z][^"']*\{[^}]*\}["']\s*\.format\s*\([^)]*(input|request|name|url|text)\s*\)''', "XSS：HTML模板format拼接用户输入"),
+                (r'''["'][^"']*<[a-zA-Z][^"']*\{[^}]*\}["']\s*\.format\s*\([^)]*(url|text|name)\s*=\s*''', "XSS：HTML模板format关键字参数（需人工确认）"),
+                (r'''\bscript\s*=\s*["'][^"']*["']\s*\+''', "XSS：JS脚本字符串拼接（</script>逃逸风险）"),
             ]
             for pattern, desc in xss_patterns:
                 if re.search(pattern, line):
+                    # r1：转义豁免——字符串拼接 HTML 标签的规则，若拼接内容已过
+                    # html.escape / escape() / markupsafe 转义（"<div>" + escape(x)
+                    # + "</div>" 是标准安全写法）→ 不报。仅作用于该条拼接规则。
+                    if pattern.startswith(r'''["\']''') and re.search(
+                            r'''\b(?:html\.)?escape\s*\(|markupsafe''', line):
+                        continue
                     issues.append({"file": rel, "line": i, "type": "XSS跨站脚本",
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
                     severity_count["high"] += 1
@@ -1917,12 +2021,17 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             ssrf_patterns = [
                 (r'''requests\.(get|post|put|delete|head|patch)\s*\(\s*f["'][^"']*\{[^}]*''',
                  "SSRF：f-string拼接URL请求"),
+                (r'''requests\.(get|post|put|delete|head|patch)\s*\(\s*["'][^"']*["']\s*\+''',
+                 "SSRF：requests字符串前缀拼接URL"),
                 (r'''requests\.(get|post|put|delete|head|patch)\s*\([^)]*\+[^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
                  "SSRF：字符串拼接用户输入URL"),
                 (r'''urllib\.(request\.urlopen|urlopen)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
                  "SSRF：urllib请求用户可控URL"),
                 (r'''urllib\.request\.urlopen\s*\([^)]*\{[^}]*''',
                  "SSRF：urllib拼接用户输入URL"),
+                (r'''urlopen\s*\(\s*["'][^"']*["']\s*\+''', "SSRF：urllib字符串前缀拼接URL"),
+                (r'''HTTPConnection\s*\(\s*[^"']''', "SSRF：http.client连接用户变量"),
+                (r'''requests\.(get|post)\s*\([^)]*["'][^"']*\{[^}]*''', "SSRF：requests模板字符串URL"),
                 (r'''httpx\.(get|post|put|delete)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
                  "SSRF：httpx请求用户可控URL"),
                 (r'''aiohttp\.(ClientSession|request)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
@@ -2176,6 +2285,52 @@ def _split_call_args(argstr: str) -> List[str]:
     return [a.strip() for a in argstr.split(",") if a.strip()]
 
 
+def _in_string_literal(line: str, pos: int) -> bool:
+    """判断行内位置 pos 是否处于字符串字面量中（r1：os.system 字样在注释/文档串
+    里被误报命令注入的根治——"Usage: os.system(cmd) is dangerous." 这类字符串
+    不是执行代码，[^"'] 规则会误命中）。逐字符扫描引号配对，忽略转义引号。"""
+    quote = None
+    for i, ch in enumerate(line[:pos]):
+        if quote:
+            if ch == quote and (i == 0 or line[i - 1] != "\\"):
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+    return quote is not None
+
+
+def _match_outside_string(line: str, pattern) -> bool:
+    """正则匹配 line 且命中位置不在字符串字面量内（行级规则过滤字符串字样用）。"""
+    for m in re.finditer(pattern, line):
+        if not _in_string_literal(line, m.start()):
+            return True
+    return False
+
+
+def _find_multiline_string_lines(lines: List[str]) -> set:
+    """标记处于三引号字符串（''' / \"\"\" docstring）内的行号集合（含开始/结束行）。
+    r5：docstring 里的危险字样（os.system/pickle.loads/yaml.load）会被行级规则
+    误报——单行引号扫描（_in_string_literal）管不了跨行三引号，需要文件级区域
+    标记。语义：docstring 是文档不执行，整行跳过安全（宁缺毋滥）。"""
+    out: set = set()
+    in_str: str = ""  # 当前三引号定界符
+    for idx, ln in enumerate(lines):
+        if in_str:
+            out.add(idx)
+            if in_str in ln:
+                in_str = ""
+            continue
+        for delim in ('"""', "'''"):
+            if delim in ln:
+                # 行内定界符出现奇数次 → 进入跨行字符串（偶数次 = 同行开闭，不标记）
+                if ln.count(delim) % 2 == 1:
+                    in_str = delim
+                    out.add(idx)
+                break
+    return out
+
+
 def _taint_var_pattern(v: str) -> str:
     """污点变量名匹配：短名（<3 字符）用严格边界防子串误报（q 不匹配 query），
     长名用词边界。统一不允许前面是字母数字/点（self.x 属性访问不算局部变量）。"""
@@ -2343,7 +2498,9 @@ def _param_bind_exempt(line: str) -> bool:
 
 def _is_safe_cross_sql_call(line: str, params: List[str]) -> bool:
     """跨文件 SQL sink 豁免：污点在 execute 绑定参数位（第二参）→ 参数化安全。
-    任一污点变量出现在 SQL 第一参（拼接/直传）→ 必报。"""
+    任一污点变量出现在 SQL 第一参（拼接/直传）→ 必报。
+    r4：第一参若是完整字符串字面量（SQL 模板）→ 直接判安全——模板内的同名
+    字样（如列名也叫 name）只是列名/表名，不是变量引用（实测误报根因）。"""
     mc = re.search(r'''\.(?:execute|query|raw)\s*\((.*)$''', line)
     if not mc:
         mc = re.search(r'''(?<![\w.])execute\s*\((.*)$''', line)
@@ -2351,7 +2508,9 @@ def _is_safe_cross_sql_call(line: str, params: List[str]) -> bool:
         return True
     argstr = mc.group(1)
     if "," in argstr:
-        first = argstr.split(",", 1)[0]
+        first = argstr.split(",", 1)[0].strip()
+        if re.fullmatch(r'''["'][^"']*["']''', first):
+            return True  # 第一参是完整静态 SQL 模板，变量只出现在绑定参数位
         return not any(re.search(_taint_var_pattern(p), first) for p in params)
     return False
 
@@ -2487,6 +2646,12 @@ def _security_suggestions(sev: Dict[str, int], total: int) -> List[str]:
 
 _LOOP_TYPES = (ast.For, ast.While, ast.AsyncFor)
 
+# r6：set 惯用参数名——x in seen/visited 是去重惯用法，视为 set 集合判断（O(1)），
+# 不报「循环内线性查找」（旧版对所有 Name 参数保守报，去重代码被误伤）
+_SET_LIKE_NAMES = {"seen", "visited", "known", "unique", "registered", "registry",
+                   "existing", "processed", "seen_items", "dedup", "unique_set",
+                   "all_seen", "known_set"}
+
 # v4.7 AST 解析缓存：同一文件多次检测（--all-checks / --grade 等）只 parse 一次。
 # 键 = (绝对路径, mtime, size)；文件未变则复用 AST，改动后自动失效。
 _AST_CACHE: Dict[Tuple[str, float, int], ast.AST] = {}
@@ -2548,6 +2713,7 @@ class _PerfVisitor(ast.NodeVisitor):
         self.rel = rel
         self.issues = []
         self._anc = []  # 祖先节点栈
+        self._str_vars = set()  # r6：函数内被赋值为字符串字面量的变量（s = "" 后 s = s + x）
 
     def _src(self, node):
         if not node.lineno:
@@ -2587,13 +2753,20 @@ class _PerfVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node):
+        # r6：先记录字符串字面量初始化（s = ""），供拼接判断识别动态类型变量
+        if (len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            self._str_vars.add(node.targets[0].id)
         if (self._in_loop() and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
                 and isinstance(node.value, ast.BinOp)
                 and isinstance(node.value.op, ast.Add)
                 and isinstance(node.value.left, ast.Name)
                 and node.value.left.id == node.targets[0].id
-                and self._is_str_expr(node.value.right)):
+                and (self._is_str_expr(node.value.right)
+                     or (isinstance(node.value.left, ast.Name)
+                         and node.value.left.id in self._str_vars))):
             self._add(node.lineno, "循环内字符串拼接", "medium",
                       "循环内 s = s + '...' 拼接字符串，O(n²) 复杂度，建议 ''.join()")
         self.generic_visit(node)
@@ -2609,10 +2782,14 @@ class _PerfVisitor(ast.NodeVisitor):
 
     @staticmethod
     def _is_linear_container(node):
-        """右操作数是否为“可能为列表”的线性容器（排除 set/dict/range/字符串/字面量元组）。"""
+        """右操作数是否为“可能为列表”的线性容器（排除 set/dict/range/字符串/字面量元组）。
+        r6：参数名是 set 惯用名（seen/visited/known/unique 等）→ 视为 set，不报
+        （x in seen 是去重惯用法，参数类型通常就是 set）。"""
         if isinstance(node, (ast.List, ast.ListComp, ast.Subscript)):
             return True
-        if isinstance(node, (ast.Name, ast.Attribute)):
+        if isinstance(node, ast.Name):
+            return node.id not in _SET_LIKE_NAMES
+        if isinstance(node, ast.Attribute):
             return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             return node.func.id not in ("set", "frozenset", "dict", "range",
@@ -2756,6 +2933,13 @@ class _PerfVisitor(ast.NodeVisitor):
     # ---- 递归无终止条件 / 无缓存 ----
     def visit_FunctionDef(self, node):
         self._check_resource_leaks(node)
+        # r6：函数级字符串初始化预扫描（s = "" → s = s + it 识别为拼接）
+        self._str_vars = {t.id for n in ast.walk(node)
+                          if isinstance(n, ast.Assign) and len(n.targets) == 1
+                          and isinstance(n.targets[0], ast.Name)
+                          and isinstance(n.value, ast.Constant)
+                          and isinstance(n.value.value, str)
+                          for t in n.targets}
         name = node.name
         has_self_call = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                             and n.func.id == name for n in ast.walk(node))

@@ -451,6 +451,8 @@ class RestrictedExecutor:
         if capture_variables and self._var_tracker is not None:
             result.variables = self._var_tracker.to_dict()
 
+        # r15：错误分类（超时/内存/语法/运行时）——restricted 路径此前漏调
+        result.classify_error()
         return result
 
     def execute_function(self, func_code: str, func_name: str,

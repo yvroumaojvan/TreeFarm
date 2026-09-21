@@ -5,6 +5,57 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.18] - 2026-09-22
+
+### 🚀 20 轮递进测试收官（776 测试全绿，新增 221 用例）
+
+深夜全权委托模式（乖宝睡觉、无人看管、限流防御装甲）完成 20 轮权威测试循环。
+全部源码逐行通读（analysis.py 3800+ 行、沙箱 13 文件、思维树算法）后，
+每轮 = 权威极难测试 → 功能全开检测 → 识别短板 → 修复 → 回归。
+
+### 🔒 安全检测补捕（漏报治理）
+- **eval/exec 别名追踪**：`e = eval; e(code)` 混淆形态——文件级收集别名映射，
+  别名调用识别为动态执行（OWASP CWE-94 绕过对抗）
+- **`.format()` 拼接传播**：`sql = "...{}...".format(污点)` 纳入污点传播（SQLi）
+- **`os.path.join` 传播**：`path = os.path.join(...)` 纳入路径污点传播
+- **requests/httpx 前缀拼接**：`requests.get("http://x/" + url)` 补捕（SSRF）
+- **tarfile 规则升级**：变量名黑名单 → 非字面量参数即报（CWE-22）
+- **Java `new String[]{}` 纯字面量豁免** + **`sk_`/`API_KEY` 硬编码密钥补捕**
+  （Stripe 真实格式 sk_live_，NetBell 实测驱动）
+- **JS 文件级拼接污点收集** + **exec/execSync/spawn 命令注入 sink**（跨行）
+- **`__proto__.admin = ` 子属性原型污染变体**（CWE-1321）
+- **跨文件参数化误报根治**：SQL 模板内列名与注入变量同名不再误判（真实误报根因）
+
+### 🛡️ 误报治理（宁缺毋滥）
+- **docstring 三引号区域跳过**：跨行三引号字符串内的危险字样不再误报
+  （os.system/pickle.loads/yaml.load 文档示例）
+- **字符串字面量内危险字样过滤**：`_in_string_literal` 行级判定扩展到
+  命令注入/路径遍历/反序列化（"Usage: os.system(cmd)" 帮助文案）
+- **`*.min.js` 压缩库跳过**：构建产物一行数万字符不再触发跨行污点误报（3DGS 实测）
+- **`os.walk` 遍历变量豁免**：`os.path.join(root, fn)` 遍历惯用法不再误报
+- **`html.escape` / Java `StringEscapeUtils` 转义豁免**：转义后拼接是安全写法
+
+### 🐛 功能修复
+- **CLI `--security` 补扫 HTML/Vue**：与 `--performance` 对齐，从 weed 补进
+  html/htm/vue 文件——前端 XSS/动态执行此前在 CLI 路径漏检（函数直调已能扫）
+- **性能检测补 `s = s + it` 拼接**：字符串字面量初始化追踪识别动态类型变量
+- **set 惯用名豁免**：`x in seen/visited` 去重惯用法不再误报线性查找
+- **沙箱错误分类补全**：restricted/subprocess 超时/语法/运行时错误统一
+  `classify_error()`（此前漏调，超时显示 unknown）
+
+### 🧪 新增测试（221 个，累计 776）
+round1 安全地狱(39) / round2 Java(30) / round3 JS(25) / round4 跨文件链(13) /
+round5 误报治理(21) / round6 性能(20) / round7 逻辑(21) / round8 结构(8) /
+round9 NetBell 回归(4) / round10 min.js(2) / round11 tornado 金标准(6) /
+round12 思维树边界(10) / round13 渲染器(7) / round14 搜索闭环(1) / round15 沙箱逃逸矩阵(17) /
+round16 CLI 健壮性(8) / round17 规模性能(4) / round18 综合对抗(3)
+
+### 📊 真实项目回归
+- **NetBell**：误报 9→6（纯字面量数组/遍历变量误报清除，真问题保留）
+- **3DGS viewer**：误报 23→0（min.js 跳过生效）
+- **tornado 金标准**：结构型 5/7 命中（bug1 契约 high 带修复建议；bug2/4 语义型
+  诚实预期留思维树兜底），已固化防退化
+
 ## [4.9.17] - 2026-09-10
 
 ### 🐛 API契约 stream 豁免回归修复（tornado#1 恢复命中）

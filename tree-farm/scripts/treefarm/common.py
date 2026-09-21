@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.17"               # 工具版本（v4.9.17：API契约 stream 豁免回归修复——assert self.stream is not None 防御性断言不再豁免（tornado#1 真 bug 恢复命中，扣子复测发现）；555 测试全绿）
+VERSION = "4.9.18"               # 工具版本（v4.9.18：20 轮递进测试收官，776 测试全绿——安全补捕 eval 别名/format 拼接/requests 前缀拼接/tarfile 变量/Java String[] 字面量豁免与 sk_ 密钥/JS 文件级拼接污点+命令 sink/__proto__ 变体/跨文件参数化列名同名误报；docstring 三字串与 min.js 压缩库误报根治；CLI --security 补扫 HTML 与 performance 对齐；性能补 s=s+x 拼接+set 惯用名豁免；沙箱超时/语法/运行时错误分类补全）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

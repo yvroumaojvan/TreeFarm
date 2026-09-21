@@ -399,6 +399,8 @@ class SubprocessSandbox:
                 result.return_code = -1
                 result.execution_time_ms = (time.time() - t0) * 1000 if 't0' in dir() else 0
 
+        # r15：错误分类（超时/内存/语法/运行时）——subprocess 路径此前漏调
+        result.classify_error()
         return result
 
     def execute_python(self, code: str, stdin: str = "") -> SandboxResult:

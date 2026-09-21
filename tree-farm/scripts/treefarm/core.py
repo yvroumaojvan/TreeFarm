@@ -596,7 +596,12 @@ class TreeFarm:
     def security(self) -> str:
         """安全漏洞检测（v4.0 新增，--security）"""
         from .analysis import detect_security_issues
-        result = detect_security_issues(self.scanned["tree"], root=self.root)
+        # r18：与 performance() 对齐——HTML/Vue 内联 JS 从 weed 补进文件列表
+        # （CODE_EXTS 不含 .html，plant 会把 html 当杂草，漏扫前端 XSS/动态执行）
+        tree_files = list(self.scanned["tree"])
+        tree_files += [f for f in self.scanned.get("weed", [])
+                       if f.lower().endswith((".html", ".htm", ".vue"))]
+        result = detect_security_issues(tree_files, root=self.root)
         issues = self._mark_spec_issues(result["issues"])
         sev = result["severity"]
         lines = [self._spec_header().rstrip("\n")]

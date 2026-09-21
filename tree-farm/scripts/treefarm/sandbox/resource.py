@@ -31,6 +31,11 @@ class ResourceLimiter:
         self.max_file_size_mb = max_file_size_mb
         self._available = hasattr(resource, "RLIMIT_AS")
 
+    @staticmethod
+    def _is_termux() -> bool:
+        """Termux/Android 检测：bionic linker 对 RLIMIT_AS 特别敏感。"""
+        return os.path.exists("/data/data/com.termux") or os.environ.get("TERMUX_VERSION") is not None
+
     @property
     def available(self) -> bool:
         """当前平台是否支持 ulimit 资源限制。"""
@@ -43,9 +48,15 @@ class ResourceLimiter:
         if not self._available:
             return
         try:
-            # 虚拟内存限制（RLIMIT_AS = 地址空间，最可靠的内存限制）
-            mem_bytes = self.max_memory_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            # ⚠️ Termux/Android：跳过 RLIMIT_AS（虚拟内存）限制。
+            # bionic linker 的 CFI MapShadow 需要超大虚拟地址空间，
+            # 实测 AS=256MB 和 AS=2GB 都会触发
+            # 'MapShadow CHECK p != MAP_FAILED failed' → SIGABRT(rc=-6)。
+            # 手机端物理内存由系统管理（有 OOM 兜底），虚拟内存限制只有误杀。
+            # 非 Termux（桌面 Linux/macOS）保持 AS 限制（防内存炸弹）。
+            if not self._is_termux():
+                mem_bytes = self.max_memory_mb * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
             # CPU 时间限制（秒）
             resource.setrlimit(resource.RLIMIT_CPU, (self.max_cpu_seconds, self.max_cpu_seconds))
             # 文件描述符数限制
