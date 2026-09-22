@@ -5,7 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.19] - 2026-09-22
+
+### 🎯 50 轮递进测试 R1-R10（878 测试全绿）
+
+- **语义型 bug 启发式**：攻下 tornado 金标准最后两个盲区（#2 Transfer-Encoding chunked 判定 / #4 Range 负偏移与 start>=end 校验）——带修复版豁免，7/7 全命中
+- **CVE 变体补捕**：ghp_/JWT/AKIA 硬编码密钥、os.system format 拼接、shelve 反序列化、requests 条件表达式 SSRF、多行 f-string SQL 传播
+- **Java +5**：MyBatis ${} 拼接、StringBuilder SQL、FileChannel 路径、setAttribute 转发 XSS、WebView JS 桥
+- **JS +5**：execFile -e 动态代码、间接 eval、got 库 SSRF、clone 原型污染、const 固定 URL 豁免
+- **跨文件引擎升级**：四层透传链（range 4）、request/req/r 前缀缩写、字典/列表容器内联源
+- **性能/逻辑**：多重拼接 s=s+a+b 检测、推导式线性查找、通用委托不一致检测、is None/True/False 豁免
+- 真实项目：NetBell 6 真问题 0 误报、3DGS 0 误报、tornado 7/7
+
 ## [4.9.18] - 2026-09-22
+
 
 ### 🚀 20 轮递进测试收官（776 测试全绿，新增 221 用例）
 

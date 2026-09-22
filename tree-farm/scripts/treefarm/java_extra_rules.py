@@ -156,3 +156,49 @@ def _scan_java_extra_file_level(lines, issues, severity_count, rel):
                            "desc": "文件读取目标为变量（可能来自用户输入）：建议白名单校验（需人工确认）",
                            "code": stripped[:100]})
             severity_count["high"] += 1
+
+        # 7) MyBatis ${} 字符串拼接（R2/50轮：@Select("...${name}") 是 SQL 拼接高危形态）
+        if re.search(r"@(?:Select|Update|Insert|Delete)\s*\(\s*\"[^\"]*\$\{", line):
+            issues.append({"file": rel, "line": i, "type": "SQL注入",
+                           "severity": "critical",
+                           "desc": "MyBatis ${} 直接拼接：用户输入可注入 SQL，应改用 #{}(#\{\} 参数化)",
+                           "code": stripped[:100]})
+            severity_count["critical"] += 1
+
+        # 8) StringBuilder 拼 SQL（跨行形态拆两条弱信号：初始化含SQL / append变量+文件含execute）
+        if re.search(r"new\s+StringBuilder\s*\(\s*\"[^\"]*(?:select|from|insert|update|delete)\s", line, re.I):
+            issues.append({"file": rel, "line": i, "type": "SQL注入",
+                           "severity": "medium",
+                           "desc": "StringBuilder 初始化为 SQL 模板并拼接动态内容：可能被注入（需人工确认）",
+                           "code": stripped[:100]})
+            severity_count["medium"] += 1
+        elif re.search(r"\.append\s*\(\s*[^\"'\s]", line) and re.search(r"execute\w*\s*\(", joined):
+            issues.append({"file": rel, "line": i, "type": "SQL注入",
+                           "severity": "medium",
+                           "desc": "StringBuilder.append 动态内容且文件含 SQL 执行：可能被注入（需人工确认）",
+                           "code": stripped[:100]})
+            severity_count["medium"] += 1
+
+        # 9) FileChannel.open 路径变量
+        if re.search(r"FileChannel\.open\s*\(\s*[^\"']", line):
+            issues.append({"file": rel, "line": i, "type": "路径遍历",
+                           "severity": "high",
+                           "desc": "FileChannel.open 目标为变量路径：可 ../ 逃逸（需人工确认）",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1
+
+        # 10) setAttribute 未转义 + 转发 JSP（跨文件 XSS 前哨；req 是常见缩写）
+        if re.search(r"setAttribute\s*\(\s*\"[^\"]*\"\s*,\s*(?:request|req)\.", line):
+            issues.append({"file": rel, "line": i, "type": "XSS跨站脚本",
+                           "severity": "medium",
+                           "desc": "setAttribute 存储未转义用户输入并转发 JSP：模板输出时可能触发反射型XSS（需人工确认）",
+                           "code": stripped[:100]})
+            severity_count["medium"] += 1
+
+        # 11) WebView addJavascriptInterface（JS 桥接暴露给网页）
+        if re.search(r"addJavascriptInterface\s*\(", line):
+            issues.append({"file": rel, "line": i, "type": "不安全配置",
+                           "severity": "high",
+                           "desc": "WebView addJavascriptInterface 暴露 JS 桥：页面可调用 native 方法，需校验来源与 @JavascriptInterface 白名单",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1

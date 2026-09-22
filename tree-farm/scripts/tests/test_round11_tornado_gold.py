@@ -60,6 +60,16 @@ class TornadoGoldStandardTest(unittest.TestCase):
         self.assertTrue(contract and contract[0].get("fix"),
                         f"bug1 缺修复建议: {contract}")
 
+    def test_bug2_semantic_hit(self):
+        # tornado#2（50轮R1 新增能力）：Transfer-Encoding chunked 判定语义缺陷
+        types = [i["type"] for i in self._logic_issues(2)]
+        self.assertIn("疑似语义缺陷", types, f"bug2 语义检测未命中: {types}")
+
+    def test_bug4_semantic_hit(self):
+        # tornado#4（50轮R1 新增能力）：Range 负偏移/start>=end 语义缺陷
+        types = [i["type"] for i in self._logic_issues(4)]
+        self.assertIn("疑似语义缺陷", types, f"bug4 语义检测未命中: {types}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1575,7 +1575,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     if param and param != "self" and param != "cls":
                         _mark_taint(param, "param")
         file_func_params[rel] = func_params
-        for ln in lines:
+        for ln_idx, ln in enumerate(lines):
             if len(ln) > 4096:
                 ln = ln[:4096]  # v4.9.2：污点收集只看行首，超长行截断防 ReDoS
             ln_strip = ln.strip()
@@ -1585,15 +1585,19 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             if "=" not in ln:
                 continue
             # 用户输入源直接赋值：x = request.args.get("..") / x = input(..) / x = request.form[".."]
-            m = re.search(r'''(\w{1,64})\s*=\s*request\.(?:args|form|values|json|data)\.get\s*\(''', ln)
+            # r6：request/req/r 前缀缩写（Flask/Django 惯用）
+            m = re.search(r'''(\w{1,64})\s*=\s*(?:request|req|r)\.(?:args|form|values|json|data)\.get\s*\(''', ln)
             if not m:
-                m = re.search(r'''(\w{1,64})\s*=\s*request\.(?:args|form|values|json|files)\s*\[['"]''', ln)
+                m = re.search(r'''(\w{1,64})\s*=\s*(?:request|req|r)\.(?:args|form|values|json|files)\s*\[['"]''', ln)
             if not m:
                 m = re.search(r'''(\w{1,64})\s*=\s*input\s*\(''', ln)
             if not m:
                 m = re.search(r'''(\w{1,64})\s*=\s*sys\.argv\[''', ln)
             if not m:
                 m = re.search(r'''(\w{1,64})\s*=\s*(?:params|request\.query|self\.request|request)\s*\.get\s*\(''', ln)
+            if not m:
+                # r6：容器字面量内含内联用户源（d = {"sql": request.args.get(...)} / arr = [input()]）
+                m = re.search(r'''(\w{1,64})\s*=\s*[\[{][^\]}]{0,160}?(?:request\.|req\.|\br\.(?:args|form|values|json|data|query|params)\.|input\s*\(|sys\.argv)''', ln)
             if m:
                 _mark_taint(m.group(1), "user")
             # 污点传播：y = x（x 是污点变量，来源继承）
@@ -1605,7 +1609,18 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             m3 = re.search(r'''(\w{1,64})\s*=\s*(.+)$''', ln)
             if m3 and len(m3.group(2)) <= 8192:  # v4.9.2：超长右值跳过（避免 in 大串）
                 lhs, rhs = m3.group(1), m3.group(2)
-                if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln))
+                # r2：多行 f-string（sql = f""" 未闭合）——吞后续行到闭合定界符，
+                # 让 {uid} 这类模板占位参与污点传播（tornado/真实项目常见跨行 SQL 模板）
+                if rhs.strip().startswith(("f\"\"\"", "f'''")) and (
+                        (rhs.count("\"\"\"") - (rhs.strip().startswith("\"\"\"") * 1)) % 2 == 1
+                        or (rhs.count("'''") - (rhs.strip().startswith("'''") * 1)) % 2 == 1):
+                    buf = rhs
+                    for extra in lines[ln_idx + 1:]:  # 从下一行吞到闭合定界符
+                        buf += "\n" + extra
+                        if "\"\"\"" in extra or "'''" in extra:
+                            break
+                    rhs = buf
+                if ("+" in rhs or ("{" in rhs and ("f\"" in ln or "f'" in ln or 'f"""' in ln or "f'''" in ln))
                         or ".format(" in rhs or "os.path.join" in rhs):
                     hits = [v for v in tainted_vars if v in rhs]
                     if hits:
@@ -1683,6 +1698,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 # v4.9.7：subprocess.call("ls " + cmd) 引号拼接形态
                 (r'''subprocess\.(call|run|Popen)\s*\(\s*["'][^"']*["']\s*\+''',
                  "命令注入：subprocess字符串拼接命令"),
+                # r2：format 拼接形态——os.system('tar czf {}'.format(x)) 引号开头被
+                # [^"'] 挡掉、缺失拼接符，只有 .format 尾缀（真实 CVE 常见写法）
+                (r'''os\.system\s*\(\s*["'][^"']*["']\s*\.\s*format\s*\(''',
+                 "命令注入：os.system format拼接命令"),
+                (r'''subprocess\.(call|run|Popen)\s*\(\s*["'][^"']*["']\s*\.\s*format\s*\(''',
+                 "命令注入：subprocess format拼接命令"),
             ]
             for pattern, desc in cmd_patterns:
                 # r1：os.system( 字样位于字符串字面量内（文档/帮助文案）→ 非执行代码，跳过
@@ -1730,6 +1751,8 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''yaml\.load\s*\([^)]*Loader\s*=\s*yaml\.FullLoader''', "不安全反序列化：yaml.load FullLoader"),
                 (r'''yaml\.load\s*\([^)]*\)''', "不安全反序列化：yaml.load（默认不安全）"),
                 (r'''marshal\.loads?\s*\(''', "不安全反序列化：marshal.loads"),
+                # r2：shelve.open 用户可控路径反序列化（shelve 内部用 pickle）
+                (r'''shelve\.open\s*\([^)]*\)''', "不安全反序列化：shelve.open（内部 pickle）"),
             ]
             for pattern, desc in deser_patterns:
                 # r5：字符串字面量里的 pickle.loads(/yaml.load( 字样（文档/示例）→ 跳过
@@ -1776,6 +1799,13 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''(stripe_secret|payment_key|pay_key|smtp_password|redis_password)\s*=\s*["'][^"']{3,}["']''',
                  "硬编码服务密码"),
                 (r'''(private_key|PRIVATE_KEY)\s*=\s*["']-----BEGIN''', "硬编码私钥"),
+                # r2：大写常量名变体（GITHUB_TOKEN/API_KEY，词边界内敏感词子串）
+                (r'''(?i)\b[a-z0-9_]*?(?:token|api_key|apikey|secret|credential)[a-z0-9_]*\s*=\s*["'][^"']{8,}["']''',
+                 "硬编码凭据（大写常量名变体）"),
+                # r2：值特征模式（不依赖变量名）
+                (r'''["']ghp_[A-Za-z0-9]{20,}["']''', "硬编码 GitHub Token（ghp_）"),
+                (r'''["']eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}["']''', "硬编码 JWT"),
+                (r'''(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])''', "硬编码 AWS Access Key（AKIA）"),
             ]
             # v4.9.4：占位符豁免——cookie_secret="__TODO:_GENERATE_YOUR_OWN_..." 是框架 demo
             # 提示用户替换的占位符（tornado 4 个 demo 全带 __TODO 前缀），不是真实密钥泄露
@@ -2025,8 +2055,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "SSRF：requests字符串前缀拼接URL"),
                 (r'''requests\.(get|post|put|delete|head|patch)\s*\([^)]*\+[^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
                  "SSRF：字符串拼接用户输入URL"),
-                (r'''urllib\.(request\.urlopen|urlopen)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[|data\[)''',
-                 "SSRF：urllib请求用户可控URL"),
+                # r2：条件表达式形态——requests.get("file://..." if u.startswith(...) else u)
+                # 注：[^)]* 会被内层括号的 ) 卡断，用 .*? 宽松匹配（单行，需人工确认级别）
+                (r'''requests\.(get|post|put|delete|head|patch)\s*\(.*?\bif\b.*?\belse\b''',
+                 "SSRF：requests条件表达式URL（动态目标，需人工确认）"),
+                (r'''urllib\.(request\.urlopen|urlopen)\s*\(.*?\bif\b.*?\belse\b''',
+                 "SSRF：urllib条件表达式URL（动态目标，需人工确认）"),
                 (r'''urllib\.request\.urlopen\s*\([^)]*\{[^}]*''',
                  "SSRF：urllib拼接用户输入URL"),
                 (r'''urlopen\s*\(\s*["'][^"']*["']\s*\+''', "SSRF：urllib字符串前缀拼接URL"),
@@ -2354,8 +2388,7 @@ def _match_tainted_args(argstr: str, tainted_vars: Dict[str, str]):
                            and re.search(_taint_var_pattern(v), expr)]
         else:
             strong_hits = []
-        inline_src = (("request" in expr or "input" in expr or "argv" in expr)
-                      and bool(re.search(r'(request\.|input\s*\(|sys\.argv)', expr)))
+        inline_src = bool(re.search(r'(request\.|req\.|\br\.(?:args|form|values|json|data|query|params)\.|input\s*\(|sys\.argv)', expr))
         if strong_hits or inline_src:
             return ai, arg_name, expr
     return None
@@ -2575,7 +2608,7 @@ def _cross_file_taint_pass(cross_calls: List[Dict[str, object]],
     handled = set()  # (caller_rel, caller_line, module, func) 去重，防循环
     reported = set()  # (file, line, type) 已报 sink 行，防重复刷屏
     processed = set()  # (target_rel, 注入参数) 已注入处理，防同参重复全文件扫描
-    for _depth in range(2):  # 最多两层：a→b→c
+    for _depth in range(4):  # 最多四层：a→b→c→d（r6 扩展，防循环有 handled/processed 去重）
         if not pending:
             break
         next_pending = []
@@ -2731,7 +2764,10 @@ class _PerfVisitor(ast.NodeVisitor):
         self._anc.pop()
 
     def _in_loop(self):
-        return any(isinstance(p, _LOOP_TYPES) for p in self._anc)
+        # r7：推导式（列表/集合/生成器）遍历也是 O(n) 循环上下文——
+        # `[x for x in a if x in b]` 的 in 线性查找此前被漏报
+        return any(isinstance(p, _LOOP_TYPES + (ast.ListComp, ast.SetComp, ast.GeneratorExp))
+                   for p in self._anc)
 
     # ---- 循环内字符串拼接：s += "x" / s = s + "x" / s += str(i) ----
     @staticmethod
@@ -2758,15 +2794,19 @@ class _PerfVisitor(ast.NodeVisitor):
                 and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)):
             self._str_vars.add(node.targets[0].id)
+        # r7：多重拼接（s = s + "a" + b + "c"）时 value.left 是嵌套 BinOp，沿 left 链找根
+        root_left = node.value.left if isinstance(node.value, ast.BinOp) else node.value
+        while isinstance(root_left, ast.BinOp):
+            root_left = root_left.left
         if (self._in_loop() and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
                 and isinstance(node.value, ast.BinOp)
                 and isinstance(node.value.op, ast.Add)
-                and isinstance(node.value.left, ast.Name)
-                and node.value.left.id == node.targets[0].id
+                and isinstance(root_left, ast.Name)
+                and root_left.id == node.targets[0].id
                 and (self._is_str_expr(node.value.right)
-                     or (isinstance(node.value.left, ast.Name)
-                         and node.value.left.id in self._str_vars))):
+                     or (isinstance(root_left, ast.Name)
+                         and root_left.id in self._str_vars))):
             self._add(node.lineno, "循环内字符串拼接", "medium",
                       "循环内 s = s + '...' 拼接字符串，O(n²) 复杂度，建议 ''.join()")
         self.generic_visit(node)
@@ -3551,8 +3591,12 @@ class _LogicVisitor(ast.NodeVisitor):
     # ---- is 与字面量比较 / 字符串大小比较 ----
     @staticmethod
     def _is_literal(node):
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, str, float)):
-            return True
+        # r8：is None / is True / is False 是合法惯用法（身份比较单例），不报
+        if isinstance(node, ast.Constant):
+            if node.value is None or node.value is True or node.value is False:
+                return False
+            if isinstance(node.value, (int, str, float)):
+                return True
         if isinstance(node, (ast.List, ast.Dict, ast.Set, ast.Tuple)):
             return True
         return False
@@ -3649,16 +3693,31 @@ class _ContractVisitor(ast.NodeVisitor):
                             and substmt.value.value is None):
                         stream_none = True
 
-        if not stream_none:
-            return
         # 找主流委托对象（被 ≥3 个不同方法使用、最常见的 attr，排除 stream/self 本身）
+        # r8：不再以 stream=None 为前提（那是 tornado#1 特例），通用委托不一致也报（medium 弱信号）
         best_attr, best_count = None, 0
         for attr, uses in method_delegates.items():
             if attr == "stream":
                 continue
             if len(uses) >= 3 and len(uses) > best_count:
                 best_attr, best_count = attr, len(uses)
-        if best_attr is None:
+        if best_attr is None and not stream_none:
+            return
+        # r8：通用委托不一致——主流 attr ≥3 方法用，恰 1~2 个方法委托别的成员（弱信号，
+        # 排除工具性成员习惯名；stream 特例走下面 tornado 逻辑报 high）
+        _TOOL_ATTRS = {"logger", "log", "helper", "util", "config", "context",
+                       "manager", "settings", "lock", "event", "callback",
+                       "handler", "notifier", "metrics", "metrics_collector"}
+        if best_attr:
+            for a, u in method_delegates.items():
+                if a == best_attr or a == "stream" or a in _TOOL_ATTRS:
+                    continue
+                if len(u) <= 2 and best_count >= 3:
+                    self._add(u[0][1].lineno, "API契约", "medium",
+                              f"方法 {u[0][0]}() 委托 self.{a}，但同类 {best_count} 个方法都委托 self.{best_attr}：疑似委托不一致（需人工确认）")
+        if not stream_none:
+            if best_attr is None:
+                return
             return
         # 若 stream 也被某方法用（且不是主流），报
         stream_uses = method_delegates.get("stream", [])
@@ -3821,6 +3880,60 @@ def _tree_uses_threading(tree) -> bool:
     return _tree_starts_threads(tree)
 
 
+def _scan_semantic_hints(lines: List[str], rel: str) -> List[Dict[str, Any]]:
+    """50轮R1：语义型 bug 弱信号启发式（低置信度·需人工确认）。
+
+    攻 tornado 金标准语义型盲区（BugsInPy #2/#4）——这类 bug 需要
+    HTTP 协议/RFC 语义理解，纯 AST 抓不到，用「模式 + 修复版豁免」弱信号：
+    - #2 Transfer-Encoding 头 'not in' 检查忽略 chunked 值
+      （修复版会补 headers["Transfer-Encoding"] == "chunked" 值比较 → 豁免）
+    - #4a 范围负偏移先比较后归一化（start>=size 出现在 start<0 之前）
+      （修复版把负偏移归一化提前到 416 检查之前 → 豁免）
+    - #4b 范围对缺 start>=end 校验（RFC 7233 非法范围应 416）
+      （修复版含 start >= end 比较 → 豁免）
+    """
+    out: List[Dict[str, Any]] = []
+    src = "\n".join(lines)
+
+    # ── #2：Transfer-Encoding not in + 无 chunked 值比较 + chunk 语境（修复版豁免）──
+    if (re.search(r'''["']Transfer-Encoding["']\s+not\s+in\s+\w+''', src)
+            and not re.search(
+                r'''Transfer-Encoding["']\s*\]\s*==|Transfer-Encoding["']\s*\)\s*=='''
+                r'''|Transfer-Encoding["']\s*\)\s*\.lower''', src)
+            and re.search(r'chunk', src, re.IGNORECASE)):
+        for i, ln in enumerate(lines, 1):
+            if re.search(r'''["']Transfer-Encoding["']\s+not\s+in\s+\w+''', ln):
+                out.append({"file": rel, "line": i, "type": "疑似语义缺陷",
+                            "severity": "low",
+                            "desc": "Transfer-Encoding 头 'not in' 检查可能忽略 chunked 值：TE: chunked 时客户端明确要求分块，not in 判定会把 chunked 响应当定长发送（tornado#2 模式，需人工确认）",
+                            "code": ln.strip()[:100]})
+                break
+
+    # ── #4a：范围比较在负偏移归一化之前（start>=size 先于 start<0）──
+    neg_lines = [i for i, ln in enumerate(lines, 1)
+                 if re.search(r'\b(start|first)\s*<\s*0', ln)]
+    cmp_lines = [i for i, ln in enumerate(lines, 1)
+                 if re.search(r'\b(start|first)\s*>=\s*\w+', ln)]
+    if neg_lines and cmp_lines and cmp_lines[0] < neg_lines[0]:
+        out.append({"file": rel, "line": cmp_lines[0], "type": "疑似语义缺陷",
+                    "severity": "low",
+                    "desc": "范围负偏移'先比较后归一化'：负数 start 先做 >=size 比较永远不成立，后缀范围（负偏移）完全失效（tornado#4a 模式，需人工确认）",
+                    "code": lines[cmp_lines[0] - 1].strip()[:100]})
+
+    # ── #4b：start,end 范围对 + end 截断 + 无 start>=end 校验 ──
+    if (re.search(r'\b(start|first)\s*,\s*(end|last)\b', src)
+            and re.search(r'\b(end|last)\s*>\s*\w+\s*:', src)
+            and not re.search(r'\b(start|first)\s*>=\s*(end|last)', src)):
+        for i, ln in enumerate(lines, 1):
+            if re.search(r'\b(start|first)\s*,\s*(end|last)\b', ln):
+                out.append({"file": rel, "line": i, "type": "疑似语义缺陷",
+                            "severity": "low",
+                            "desc": "范围对缺少 start>=end 校验：RFC 7233 规定 last-byte-pos < first-byte-pos 为非法范围应返回 416，无校验会直接进入正常下载分支（tornado#4b 模式，需人工确认）",
+                            "code": ln.strip()[:100]})
+                break
+    return out
+
+
 def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Dict[str, Any]:
     """检测逻辑错误（v4.5 AST 重写；v4.7 新增契约检测 + 异步降误报）：
     可变默认参数 / 除零风险 / 边界条件越界 / 竞态条件（仅真实使用线程，异步框架降误报）/
@@ -3852,6 +3965,8 @@ def detect_logic_issues(tree_files: List[str], root: Optional[str] = None) -> Di
         cv = _ContractVisitor(lines, rel)
         cv.visit(tree)
         issues.extend(cv.issues)
+        # 50轮R1：语义型 bug 弱信号（tornado#2/#4 模式，低置信度需人工确认）
+        issues.extend(_scan_semantic_hints(lines, rel))
 
     severity_count = {"high": 0, "medium": 0, "low": 0}
     for i in issues:

@@ -7,6 +7,13 @@ import re
 
 
 def _scan_js_extra_security(lines, issues, severity_count, rel):
+    # r4：文件级 const 字面量/无占位模板集合（const url = `https://...` → 固定目标，SSRF 豁免）
+    const_literals = set()
+    for _ln in lines:
+        m = re.search(r"\b(?:const|let|var)\s+(\w+)\s*=\s*(`[^`]*`|\"[^\"]*\"|'[^']*')", _ln)
+        if m and "${" not in m.group(2):
+            const_literals.add(m.group(1))
+
     for i, line in enumerate(lines, 1):
         if len(line) > 32768:
             line = line[:32768]
@@ -15,11 +22,13 @@ def _scan_js_extra_security(lines, issues, severity_count, rel):
             continue
 
         # 1) 命令注入：child_process exec/execSync/spawn 拼接或模板串
+        # r4：execFile 带 -e/-c 参数（执行代码等价 eval）
         if re.search(r"(?:exec|execSync)\s*\([^)]*\+", line) \
                 or re.search(r"exec(Sync)?\s*\(`[^`]*\$\{", line) \
                 or re.search(r"spawn\s*\(\s*['\"`]sh['\"`]\s*,\s*['\"`]-c['\"`]\s*,\s*\w", line) \
                 or re.search(r"spawn\s*\(\s*['\"]sh['\"]\s*,\s*\[\s*['\"]-c['\"]\s*,\s*\w", line) \
-                or re.search(r"child_process\s*\.\s*exec\s*\([^)]*\+", line):
+                or re.search(r"child_process\s*\.\s*exec\s*\([^)]*\+", line) \
+                or re.search(r"execFile\s*\([^)]*[\"']-[ec][\"']", line):
             issues.append({"file": rel, "line": i, "type": "命令注入",
                            "severity": "critical",
                            "desc": "child_process 命令拼接动态内容：用户输入可注入 shell 命令",
@@ -34,23 +43,29 @@ def _scan_js_extra_security(lines, issues, severity_count, rel):
                            "code": stripped[:100]})
             severity_count["high"] += 1
 
-        # 3) SSRF：fetch/http/axios/net 动态目标
+        # 3) SSRF：fetch/http/axios/net/got 动态目标
+        # r4：const 字面量/无占位模板变量豁免（const url = \`https://...\` 是固定目标）
         if re.search(r"(?:fetch|axios\.(?:get|post|put|delete))\s*\(\s*[^\"'`\[]", line) \
                 or re.search(r"http\.(?:get|request)\s*\(\s*[^\"'`\[]", line) \
                 or re.search(r"http\.(?:get|request)\s*\([^)]*\+", line) \
                 or re.search(r"(?:fetch|axios\.(?:get|post))\s*\(`[^`]*\$\{", line) \
+                or re.search(r"\bgot\s*\(\s*[^\"'`\[]", line) \
                 or re.search(r"net\.createConnection\s*\([^)]*,[^)]*\w", line):
-            issues.append({"file": rel, "line": i, "type": "SSRF",
-                           "severity": "high",
-                           "desc": "网络请求目标为动态变量：用户可控URL可访问内网/本地",
-                           "code": stripped[:100]})
-            severity_count["high"] += 1
+            # 变量仅在 const 字面量/无占位模板时豁免（固定 URL 不是 SSRF）
+            m_dyn = re.search(r"(?:fetch|axios\.(?:get|post|put|delete)|http\.(?:get|request)|got)\s*\(\s*(\w+)", line)
+            if not (m_dyn and m_dyn.group(1) in const_literals):
+                issues.append({"file": rel, "line": i, "type": "SSRF",
+                               "severity": "high",
+                               "desc": "网络请求目标为动态变量：用户可控URL可访问内网/本地",
+                               "code": stripped[:100]})
+                severity_count["high"] += 1
 
         # 4) 原型污染（r3：__proto__.admin = 形态 —— __proto__ 后跟子属性赋值同样污染原型）
         if re.search(r"Object\.assign\s*\([^)]*JSON\.parse", line) \
                 or re.search(r"\.__proto__\s*=", line) \
                 or re.search(r"\.__proto__\.[\w$]+\s*=", line) \
                 or re.search(r"merge\s*\(\s*[^)]*JSON\.parse", line) \
+                or re.search(r"clone\s*\(\s*[^)]*JSON\.parse", line) \
                 or re.search(r"\{\s*\.\.\.\w+\s*\}", line) \
                 or re.search(r"\[\s*\w+\s*\]\s*=\s*(?:req\.|input\s*\()", line):
             issues.append({"file": rel, "line": i, "type": "原型污染",
@@ -70,10 +85,11 @@ def _scan_js_extra_security(lines, issues, severity_count, rel):
                            "code": stripped[:100]})
             severity_count["medium"] += 1
 
-        # 6) 动态执行
+        # 6) 动态执行（r4：间接 eval 形态 (0, eval)(code)）
         if re.search(r"new\s+Function\s*\([^)]*\w", line) \
                 or re.search(r"require\s*\(\s*[^\"'`\[]", line) \
-                or re.search(r"vm\.runInNewContext\s*\([^)]*\w", line):
+                or re.search(r"vm\.runInNewContext\s*\([^)]*\w", line) \
+                or re.search(r"\(\s*0\s*,\s*eval\s*\)\s*\(", line):
             issues.append({"file": rel, "line": i, "type": "动态执行",
                            "severity": "high",
                            "desc": "动态代码执行/加载（Function/require/vm）：外部输入可任意执行",
