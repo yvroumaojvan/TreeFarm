@@ -206,8 +206,8 @@ class PathTraversalHardTest(unittest.TestCase):
     def test_open_join_concat(self):
         issues = issues_of('''\
 import os
-def read(fname):
-    path = os.path.join("/var/data", fname)
+def read(file_name):
+    path = os.path.join("/var/data", file_name)
     return open(path).read()
 ''', "路径遍历")
         self.assertTrue(len(issues) >= 1, f"join 拼接漏报: {issues}")
@@ -292,13 +292,13 @@ class HardcodedSecretTest(unittest.TestCase):
 
     def test_sk_key(self):
         issues = issues_of('''\
-API_KEY = "sk-1234567890abcdefghij"
+API_KEY = "sk-X0X0X0X0X0X0X0X0X0X0X0X0"
 ''', "硬编码凭据")
         self.assertTrue(len(issues) >= 1, f"sk- key 漏报: {issues}")
 
     def test_jwt_secret(self):
         issues = issues_of('''\
-JWT_SECRET = "my-super-secret-jwt-key-123456"
+JWT_SECRET = "X0X0X0-my-super-secret-jwt-key-X0X0X0X0"
 ''', "硬编码凭据")
         self.assertTrue(len(issues) >= 1, f"jwt_secret 漏报: {issues}")
 

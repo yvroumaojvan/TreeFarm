@@ -5,7 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.20] - 2026-09-23
+
+### 🚀 35 轮递进测试 R11-R25（949 测试全绿）
+
+- **反序列化深化**：pickle 别名追踪（import pickle as p → p.loads）、SafeLoader 豁免、
+  动态导入反序列化（__import__(mod).loads）；修复 deser 循环 continue 跳过别名检查的 bug + 防重复报
+- **SSRF 扩展**：httpx/aiohttp/urllib3/socket 直连（收紧为用户可控目标）、内网/云元数据 IP
+  字面量（169.254.169.254 等）、条件表达式 URL
+- **SSTI 模板注入（新攻击类型）**：from_string/Template/render_template_string 动态模板检测
+- **硬编码扩展**：连接串内嵌密码、Slack xox token、三引号 PEM 私钥（修复 docstring 吞赋值 bug）
+- **供应链/.env（新文件类型）**：.env 密钥泄露检测 + requirements.txt 未钉版本风险
+- **混淆对抗**：__dict__/globals()[] 动态调用、getattr 取危险内置函数、拼接 exec
+- **CVE 模式**：CORS 通配符/反射、tempfile.mktemp 竞态、Spring SpEL 表达式注入（java.net 全限定名）
+- **误报治理**：Dogfooding 自扫 8→1（沙箱执行器 exec 设计内豁免、join 名单去泛变量名 fname/name/path）
+- **稳定性**：CLI 边界补测（空文件/特殊文件名/超长行/沙箱未开启）全部不崩
+
 ## [4.9.19] - 2026-09-22
+
 
 ### 🎯 50 轮递进测试 R1-R10（878 测试全绿）
 

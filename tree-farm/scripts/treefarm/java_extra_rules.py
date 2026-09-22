@@ -55,8 +55,8 @@ def _scan_java_extra_security(lines, issues, severity_count, rel):
                            "code": stripped[:100]})
             severity_count["critical"] += 1
 
-        # 6) SSRF：URL/Socket/HttpURLConnection 动态目标
-        if re.search(r"(new\s+URL\s*\(\s*[^\"')]|new\s+Socket\s*\(\s*[^\"')]|HttpURLConnection)", line):
+        # 6) SSRF：URL/Socket/HttpURLConnection 动态目标（r25：支持 java.net. 全限定名）
+        if re.search(r"(new\s+(?:java\.net\.)?URL\s*\(\s*[^\"')]|new\s+(?:java\.net\.)?Socket\s*\(\s*[^\"')]|HttpURLConnection)", line):
             issues.append({"file": rel, "line": i, "type": "SSRF",
                            "severity": "high",
                            "desc": "网络请求目标为动态变量：用户可控URL可访问内网/本地",
@@ -200,5 +200,14 @@ def _scan_java_extra_file_level(lines, issues, severity_count, rel):
             issues.append({"file": rel, "line": i, "type": "不安全配置",
                            "severity": "high",
                            "desc": "WebView addJavascriptInterface 暴露 JS 桥：页面可调用 native 方法，需校验来源与 @JavascriptInterface 白名单",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1
+
+        # 12) Spring EL 表达式注入（Spring4Shell 类：SpelExpressionParser 动态表达式）
+        if re.search(r"(?:SpelExpressionParser|parseExpression)\s*\(", line) \
+                and re.search(r"\w+\s*\([^)]*\bexpr\b", line, re.I):
+            issues.append({"file": rel, "line": i, "type": "动态执行",
+                           "severity": "high",
+                           "desc": "Spring SpEL 表达式注入：表达式来自外部可任意代码执行（Spring4Shell 类）",
                            "code": stripped[:100]})
             severity_count["high"] += 1

@@ -1478,8 +1478,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
     cross_calls: List[Dict[str, object]] = []
 
     for fpath in tree_files:
+        base_name = os.path.basename(fpath)
         ext = os.path.splitext(fpath)[1].lower()
-        if ext not in _SECURITY_EXTS:
+        # r14：供应链/.env 特殊文件支持（密钥泄露 + 依赖未钉版本）
+        is_env_file = base_name == ".env"
+        is_req_file = base_name in ("requirements.txt", "Pipfile")
+        if ext not in _SECURITY_EXTS and not is_env_file and not is_req_file:
             continue
         # r10：压缩第三方库（*.min.js）跳过——构建产物一行数万字符，污点收集
         # 极易误报（3DGS three.min.js 实测：跨行污点命令注入/SSRF 假命中）
@@ -1493,6 +1497,32 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
 
         rel = os.path.relpath(fpath, root) if root else fpath
         full_text = "".join(lines)
+
+        # r14：.env 文件敏感配置暴露（若被提交/打包即泄露风险）
+        if is_env_file:
+            for i, ln in enumerate(lines, 1):
+                if ln.strip() and not ln.strip().startswith("#") and "=" in ln:
+                    k, v = ln.split("=", 1)
+                    if re.search(r'(?i)(key|token|secret|password|passwd|api|credential)', k) \
+                            and len(v.strip()) >= 8:
+                        issues.append({"file": rel, "line": i, "type": "密钥泄露",
+                                       "severity": "high",
+                                       "desc": ".env 文件含敏感配置：若被提交到仓库/打包即泄露，应确认已加入 .gitignore",
+                                       "code": ln.strip()[:100]})
+                        severity_count["high"] += 1
+            continue
+        # r14：requirements.txt/Pipfile 依赖未钉版本（供应链可重复性风险）
+        if is_req_file:
+            for i, ln in enumerate(lines, 1):
+                if re.search(r'==|~=|===', ln) or ln.strip().startswith(("#", "-", "[")):
+                    continue  # 已钉版本/注释/选项/章节头
+                if re.search(r'^\s*[\w\-\.]+', ln):
+                    issues.append({"file": rel, "line": i, "type": "供应链风险",
+                                   "severity": "low",
+                                   "desc": "依赖未钉版本（==）：升级路径不可复现，建议固定版本（供应链可重复性）",
+                                   "code": ln.strip()[:100]})
+                    severity_count["low"] += 1
+            continue
 
         # v4.8.3：Java 文件走专用启发式安全规则，跳过下方 Python 语法规则
         if ext == ".java":
@@ -1562,6 +1592,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             ma = re.match(r'''^\s*(\w+)\s*=\s*((?:__import__|eval|exec))\b''', ln)
             if ma:
                 dyn_aliases[ma.group(1)] = ma.group(2)
+
+        # r11：pickle 别名收集（import pickle as p → p.loads 同样是危险反序列化）
+        pickle_aliases = [m.group(1) for m in
+                          re.finditer(r'''^\s*import\s+(?:pickle|cPickle)\s+as\s+(\w+)\s*$''',
+                                      "\n".join(lines), re.MULTILINE)]
 
         # 函数参数 → param 弱污点（外部调用者可能传用户值，但需拼接/传播才升级为可报）
         # v4.9.5：同时记录 函数名→参数表（跨文件污点第二阶段按位置/名字注入）
@@ -1721,7 +1756,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''\bopen\s*\(\s*["'][^"']*["']\s*\+''', "路径遍历：open字符串前缀拼接变量"),
                 (r'''open\s*\(\s*request\.''', "路径遍历：open接收用户输入"),
                 (r'''os\.path\.join\s*\([^)]*(request|input|argv|args|getenv)''', "路径遍历：join拼接用户输入"),
-                (r'''os\.path\.join\s*\([^)]*,\s*(input|request|fname|name|path|filename|file_name|filepath)\s*\)''', "路径遍历：join拼接常见用户输入变量（需人工确认）"),
+                (r'''os\.path\.join\s*\([^)]*,\s*(input|request|filename|file_name|filepath)\s*\)''', "路径遍历：join拼接常见用户输入变量（需人工确认）"),
                 (r'''shutil\.copyfile\s*\(\s*[^"']\w+\s*,\s*''', "路径遍历：copyfile变量源路径（需人工确认）"),
                 (r'''\b(?:open|remove|unlink|rmtree)\s*\([^"']\w+[^)]*\+''', "路径遍历：文件操作拼接路径"),
                 (r'''\b(?:remove|unlink|rmtree|shutil\.copyfile)\s*\(\s*["'][^"']*["']\s*\+''', "路径遍历：删除/复制字符串前缀拼接变量"),
@@ -1753,15 +1788,49 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''marshal\.loads?\s*\(''', "不安全反序列化：marshal.loads"),
                 # r2：shelve.open 用户可控路径反序列化（shelve 内部用 pickle）
                 (r'''shelve\.open\s*\([^)]*\)''', "不安全反序列化：shelve.open（内部 pickle）"),
+                # r17：动态导入后反序列化（__import__(mod).loads(data) 混淆形态）
+                (r'''__import__\s*\([^)]*\)\s*\.\s*loads?\s*\(''', "不安全反序列化：动态导入反序列化"),
             ]
+            # r11：pickle 别名收集在文件级完成（pickle_aliases），此处直接用
+            alias_reported = False
             for pattern, desc in deser_patterns:
-                # r5：字符串字面量里的 pickle.loads(/yaml.load( 字样（文档/示例）→ 跳过
-                if not _match_outside_string(line, pattern):
+                # r11：yaml.load(...Loader=yaml.SafeLoader) 安全 → 豁免
+                if "yaml.load" in desc and re.search(r'Loader\s*=\s*yaml\.SafeLoader', line):
                     continue
-                if re.search(pattern, line):
+                # 正则命中且不在字符串字面量内 → 报；否则继续（含别名检查）
+                if re.search(pattern, line) and _match_outside_string(line, pattern):
                     issues.append({"file": rel, "line": i, "type": "不安全反序列化",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
+                    alias_reported = True
+                    break
+                # r11：pickle 别名调用（p.loads(...)）——命中即标记，防多 pattern 重复报
+                if not alias_reported:
+                    for p_alias in pickle_aliases:
+                        if re.search(r'\b' + re.escape(p_alias) + r'\.loads?\s*\(', line):
+                            issues.append({"file": rel, "line": i, "type": "不安全反序列化",
+                                           "severity": "critical",
+                                           "desc": f"不安全反序列化：pickle 别名 {p_alias}.loads()",
+                                           "code": stripped[:100]})
+                            severity_count["critical"] += 1
+                            alias_reported = True
+                            break
+
+            # 4.45 模板注入 SSTI 检测（R13 新增：Jinja2/Django 模板字符串来自用户输入）
+            # 经典形态：Template(用户输入)/env.from_string(用户输入)/render_template_string(拼接)
+            ssti_patterns = [
+                (r'''\b\w+\.from_string\s*\(\s*[^"'`]''', "模板注入：from_string 动态模板"),
+                (r'''(?:jinja2\.)?Template\s*\(\s*[^"'`]''', "模板注入：Template 变量模板"),
+                (r'''render_template_string\s*\([^)]*\+''', "模板注入：render_template_string 拼接"),
+                (r'''render_template_string\s*\(\s*f["']''', "模板注入：render_template_string f-string"),
+                (r'''Template\s*\(\s*f["'][^"]*\{''', "模板注入：Template f-string"),
+            ]
+            for pattern, desc in ssti_patterns:
+                if re.search(pattern, line):
+                    issues.append({"file": rel, "line": i, "type": "模板注入",
+                                   "severity": "high", "desc": desc,
+                                   "code": stripped[:100]})
+                    severity_count["high"] += 1
                     break
 
             # 4.5 动态执行检测（eval/exec/compile+exec：OWASP 代码注入必查）
@@ -1773,6 +1842,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''\bexec\s*\(\s*(?!["']\s*\))[^"']''', "动态执行：exec(变量代码)"),
                 (r'''\bcompile\s*\([^)]*\).{0,200}?\bexec\s*\(''', "动态执行：compile+exec组合"),
                 (r'''\b__import__\s*\(\s*[^"']''', "动态执行：__import__动态导入"),
+                # r17：混淆对抗——动态属性/全局表调用（__dict__[x]( / globals()[name]( / vars()[...](）
+                (r'''(?:__dict__\s*\[[^\]]*\]|(?:globals|locals|vars)\s*\(\s*\)\s*\[[^\]]*\])\s*\(''',
+                 "动态执行：动态属性/全局表调用"),
+                # r17：getattr 从 __builtins__ 取危险内置函数
+                (r'''getattr\s*\(\s*(?:__builtins__|builtins)\s*,\s*["'](?:eval|exec|execfile|compile)["']''',
+                 "动态执行：getattr取危险内置函数"),
             ]
             if dyn_aliases:
                 for alias_name, real_func in dyn_aliases.items():
@@ -1784,6 +1859,11 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 if not _match_outside_string(line, pattern):
                     continue
                 if re.search(pattern, line):
+                    # r22：沙箱执行器内部 exec/__import__ 是设计内行为（执行用户代码
+                    # 是沙箱引擎职责；_safe_import 白名单检查的 __import__ 是安全代码）
+                    if ("sandbox" in rel and desc.startswith("动态执行")
+                            and re.search(r'exec\s*\(|__import__\s*\(|_safe_import|original_code|profiler\.', line)):
+                        break
                     issues.append({"file": rel, "line": i, "type": "动态执行",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
@@ -1806,6 +1886,12 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''["']ghp_[A-Za-z0-9]{20,}["']''', "硬编码 GitHub Token（ghp_）"),
                 (r'''["']eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}["']''', "硬编码 JWT"),
                 (r'''(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])''', "硬编码 AWS Access Key（AKIA）"),
+                # r11：URL 连接串内嵌密码（postgresql://user:pass@host）
+                (r'''(?:[a-z]+)://[^:\s]+:[^@\s]{4,}@''', "硬编码连接串密码（URL内嵌）"),
+                # r11：Slack Token（xoxb-/xoxp-/xoxa-）
+                (r'''["']xox[abp]-[A-Za-z0-9-]{10,}["']''', "硬编码 Slack Token（xox-）"),
+                # r11：三引号 PEM 私钥（KEY = """-----BEGIN ... KEY-----"""）
+                (r'''(?:private_key|PRIVATE_KEY|KEY|key)\s*=\s*"""\s*-----BEGIN''', "硬编码私钥（三引号PEM）"),
             ]
             # v4.9.4：占位符豁免——cookie_secret="__TODO:_GENERATE_YOUR_OWN_..." 是框架 demo
             # 提示用户替换的占位符（tornado 4 个 demo 全带 __TODO 前缀），不是真实密钥泄露
@@ -2074,6 +2160,18 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                  "SSRF：请求URL来自用户输入"),
                 (r'''(requests|httpx)\.(get|post|put|delete)\s*\([^)]*(request\.|input\(|params\[|args\[|form\[)''',
                  "SSRF：请求目标来自用户请求参数"),
+                # r11：httpx/aiohttp/urllib3 变量直传（无 request 字样，纯动态目标）
+                (r'''httpx\.(get|post|put|delete|stream)\s*\(\s*[^"'`\[]''', "SSRF：httpx动态URL"),
+                (r'''httpx\.(get|post|put|delete|stream)\s*\(f["'][^"]*\{''', "SSRF：httpx模板URL"),
+                (r'''aiohttp\.ClientSession\s*\([^)]*\)\s*(?:as\s+\w+\s*)?:''', "SSRF：aiohttp会话（需人工确认）"),
+                (r'''\bs\.(get|post|put|delete)\s*\(\s*[^"'`]''', "SSRF：aiohttp s.get动态URL（需人工确认）"),
+                (r'''urllib3\.PoolManager\s*\(''', "SSRF：urllib3连接管理器（需人工确认）"),
+                (r'''\.request\s*\(\s*["'][A-Z]+["']\s*,\s*[^"'`]''', "SSRF：urllib3.request动态URL"),
+                (r'''socket\.create_connection\s*\(\s*\([^)]*(?:request\.|input\s*\(|sys\.argv|target|user|url)''',
+                 "SSRF：socket直连动态目标（用户可控）"),
+                # r11：内网/云元数据 IP 字面量（SSRF 经典目标：169.254.169.254 等）
+                (r'''(?:requests|httpx|urllib)\.(?:get|post|put|delete|head|patch)\s*\(\s*["']https?://(?:169\.254\.|10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.)''',
+                 "SSRF：请求内网/云元数据IP（169.254.169.254等）"),
             ]
             for pattern, desc in ssrf_patterns:
                 if re.search(pattern, line, re.IGNORECASE):
@@ -2081,6 +2179,26 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
                     severity_count["high"] += 1
                     break
+
+            # 9.5x CORS 通配符 + 临时文件竞态（R20：真实 CVE 模式补充）
+            if re.search(r'Access-Control-Allow-Origin.{0,30}\*', line):
+                issues.append({"file": rel, "line": i, "type": "CORS配置不当",
+                               "severity": "medium",
+                               "desc": "Access-Control-Allow-Origin 设置为 *（通配符）：任意来源可跨域读取响应，敏感接口应限定白名单",
+                               "code": stripped[:100]})
+                severity_count["medium"] += 1
+            elif re.search(r'Access-Control-Allow-Origin.{0,50}request', line):
+                issues.append({"file": rel, "line": i, "type": "CORS配置不当",
+                               "severity": "medium",
+                               "desc": "Access-Control-Allow-Origin 直接反射请求 Origin：任意站点可携带凭证跨域，建议白名单校验",
+                               "code": stripped[:100]})
+                severity_count["medium"] += 1
+            elif re.search(r'tempfile\.mktemp\s*\(', line):
+                issues.append({"file": rel, "line": i, "type": "临时文件竞态",
+                               "severity": "high",
+                               "desc": "tempfile.mktemp 不安全：先用后建存在 TOCTOU/symlink 攻击风险（CVE 常见），应使用 tempfile.mkstemp",
+                               "code": stripped[:100]})
+                severity_count["high"] += 1
 
             # 9.5 XXE检测（v4.6新增：补足XML外部实体注入盲区）
             xxe_patterns = [
@@ -2359,6 +2477,11 @@ def _find_multiline_string_lines(lines: List[str]) -> set:
             if delim in ln:
                 # 行内定界符出现奇数次 → 进入跨行字符串（偶数次 = 同行开闭，不标记）
                 if ln.count(delim) % 2 == 1:
+                    # r11：赋值形态（KEY = """...）不是 docstring——含敏感数据
+                    # 需要检测，不能当文档跳过（三引号私钥漏报根因）
+                    first_pos = ln.find(delim)
+                    if re.search(r'=\s*$', ln[:first_pos]):
+                        break
                     in_str = delim
                     out.add(idx)
                 break

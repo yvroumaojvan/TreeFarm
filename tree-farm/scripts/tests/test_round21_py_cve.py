@@ -192,19 +192,19 @@ class HardcodedCveTest(unittest.TestCase):
 
     def test_ghp_token(self):
         issues = issues_of('''\
-GITHUB_TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+GITHUB_TOKEN = "ghp_X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0"
 ''', "硬编码凭据")
         self.assertTrue(len(issues) >= 1, f"ghp_ 漏报: {issues}")
 
     def test_jwt_token(self):
         issues = issues_of('''\
-AUTH = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+AUTH = "eyJX0X0X0X0X0X0X0X0X0X0X0.X0X0X0X0X0X0X0X0X0X0X0.X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0X0"
 ''', "硬编码凭据")
         self.assertTrue(len(issues) >= 1, f"JWT 漏报: {issues}")
 
     def test_aws_key(self):
         issues = issues_of('''\
-AKIAIOSFODNN7EXAMPLE
+AKIAX0X0X0X0X0X0X0X0
 ''', "硬编码凭据")
         self.assertTrue(len(issues) >= 1, f"AWS AKIA 漏报: {issues}")
 

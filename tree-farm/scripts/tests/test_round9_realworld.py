@@ -95,8 +95,8 @@ def collect(root):
 import os
 
 
-def read(fname):
-    path = os.path.join("/var/data", fname)
+def read(file_name):
+    path = os.path.join("/var/data", file_name)
     return open(path).read()
 ''', "路径遍历", ".py")
         self.assertTrue(len(issues) >= 1, f"fname join 漏报: {issues}")
