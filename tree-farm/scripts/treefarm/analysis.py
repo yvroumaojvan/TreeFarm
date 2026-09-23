@@ -1610,6 +1610,8 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                     if param and param != "self" and param != "cls":
                         _mark_taint(param, "param")
         file_func_params[rel] = func_params
+        # r41：文件级参数名集合（命令注入等 sink 命中参数直传时降级需人工确认）
+        params_set = {p for plist in func_params.values() for p in plist}
         for ln_idx, ln in enumerate(lines):
             if len(ln) > 4096:
                 ln = ln[:4096]  # v4.9.2：污点收集只看行首，超长行截断防 ReDoS
@@ -1745,6 +1747,15 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 if not _match_outside_string(line, pattern):
                     continue
                 if re.search(pattern, line):
+                    # r41：参数直传 sink（调用方可能传常量/安全值）→ 降级「需人工确认」
+                    m_pv = re.search(r'\b(?:os\.system|os\.popen|subprocess\.\w+|os\.spawn\w*|exec)\s*\(\s*(\w+)', line)
+                    if m_pv and m_pv.group(1) in params_set:
+                        issues.append({"file": rel, "line": i, "type": "命令注入",
+                                       "severity": "low",
+                                       "desc": desc + "（参数由调用方传入，需人工确认）",
+                                       "code": stripped[:100]})
+                        severity_count["low"] += 1
+                        break
                     issues.append({"file": rel, "line": i, "type": "命令注入",
                                    "severity": "critical", "desc": desc, "code": stripped[:100]})
                     severity_count["critical"] += 1
@@ -1821,7 +1832,7 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
             ssti_patterns = [
                 (r'''\b\w+\.from_string\s*\(\s*[^"'`]''', "模板注入：from_string 动态模板"),
                 (r'''(?:jinja2\.)?Template\s*\(\s*[^"'`]''', "模板注入：Template 变量模板"),
-                (r'''render_template_string\s*\([^)]*\+''', "模板注入：render_template_string 拼接"),
+                (r'''render_template_string\s*\(.*?\+''', "模板注入：render_template_string 拼接"),
                 (r'''render_template_string\s*\(\s*f["']''', "模板注入：render_template_string f-string"),
                 (r'''Template\s*\(\s*f["'][^"]*\{''', "模板注入：Template f-string"),
             ]
@@ -2105,6 +2116,9 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                 (r'''["'][^"']*<[a-zA-Z][^"']*\{[^}]*\}["']\s*\.format\s*\([^)]*(input|request|name|url|text)\s*\)''', "XSS：HTML模板format拼接用户输入"),
                 (r'''["'][^"']*<[a-zA-Z][^"']*\{[^}]*\}["']\s*\.format\s*\([^)]*(url|text|name)\s*=\s*''', "XSS：HTML模板format关键字参数（需人工确认）"),
                 (r'''\bscript\s*=\s*["'][^"']*["']\s*\+''', "XSS：JS脚本字符串拼接（</script>逃逸风险）"),
+                # r36：iframe srcdoc 动态赋值 / onerror 事件处理器注入
+                (r'''\.srcdoc\s*=\s*''', "XSS：iframe srcdoc 动态赋值（用户内容可注入HTML）"),
+                (r'''\.onerror\s*=\s*["'][^"']*["']''', "XSS：事件处理器注入（onerror 执行代码）"),
             ]
             for pattern, desc in xss_patterns:
                 if re.search(pattern, line):

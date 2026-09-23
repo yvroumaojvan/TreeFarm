@@ -13,6 +13,7 @@
   9. 覆盖率：基于 trace 模块的轻量覆盖率采集
 """
 import ast
+import re
 import sys
 import io
 import time
@@ -264,6 +265,13 @@ class RestrictedExecutor:
             # 检查危险节点类型
             if type(node) in _DANGEROUS_NODES:
                 return False, f"禁止的操作: {type(node).__name__}"
+
+            # r38：format 字符串逃逸（'{0.__class__}'.format(...)——属性藏在字符串内，
+            # AST 属性检查看不到，需对字符串常量内容扫描）
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if re.search(r'\{\s*[^{}]*__(?:class|globals|bases|mro|subclasses|import|dict|code|func|self|closure)__', node.value) \
+                        and ".format(" in code:
+                    return False, "禁止 format 字符串逃逸（__xxx__ 属性访问）"
 
             # 检查危险函数调用
             if isinstance(node, ast.Call):

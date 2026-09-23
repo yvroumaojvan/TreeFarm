@@ -482,6 +482,11 @@ function main() {
     if (parent.status !== 'expanded' && parent.status !== 'scored') {
       console.log('⚠️ 节点 ' + pid + ' 状态为 ' + parent.status + '，建议先 select 选可展开节点');
     }
+    // r37：空分支数组友好拒绝（不产生 0 个节点的无效展开）
+    if (branches.length === 0) {
+      console.log('⚠️ 分支数组为空：expand 需要至少 1 个分支，请检查 JSON 格式');
+      process.exit(1);
+    }
     parent.status = 'expanded';
     var ids = branches.map(function (b) {
       return newNode(state, pid, b.type === 'consensus' ? 'consensus' : 'branch', b).id;
