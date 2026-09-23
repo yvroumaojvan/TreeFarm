@@ -48,7 +48,7 @@ def u():
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE id = ?", (uid,))
     return "ok"
-'''), f"Flask 参数化误报: {issues_of('''from flask import Flask, request\nimport sqlite3\napp = Flask(__name__)\n@app.route(\"/u\")\ndef u():\n    uid = request.args.get(\"id\")\n    cur = sqlite3.connect(\"db.sqlite\").cursor()\n    cur.execute(\"SELECT * FROM users WHERE id = ?\", (uid,))\n    return \"ok\"\n''')}")
+'''), "Flask 参数化误报")
 
     def test_orm_filter(self):
         self.assertEqual([], issues_of('''\
