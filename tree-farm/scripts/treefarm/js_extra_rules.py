@@ -14,6 +14,13 @@ def _scan_js_extra_security(lines, issues, severity_count, rel):
         if m and "${" not in m.group(2):
             const_literals.add(m.group(1))
 
+    # P5：编码函数赋值变量集合（String.fromCharCode/atob 拼接 → 危险调用 = 编码混淆绕过）
+    encoded_vars = set()
+    for _ln in lines:
+        m = re.search(r"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:String\.fromCharCode|atob|Buffer\.from)\s*\(", _ln)
+        if m:
+            encoded_vars.add(m.group(1))
+
     for i, line in enumerate(lines, 1):
         if len(line) > 32768:
             line = line[:32768]
@@ -23,15 +30,18 @@ def _scan_js_extra_security(lines, issues, severity_count, rel):
 
         # 1) 命令注入：child_process exec/execSync/spawn 拼接或模板串
         # r4：execFile 带 -e/-c 参数（执行代码等价 eval）
+        # P5：编码函数赋值变量（fromCharCode/atob/Buffer.from → 编码混淆命令）
         if re.search(r"(?:exec|execSync)\s*\([^)]*\+", line) \
                 or re.search(r"exec(Sync)?\s*\(`[^`]*\$\{", line) \
                 or re.search(r"spawn\s*\(\s*['\"`]sh['\"`]\s*,\s*['\"`]-c['\"`]\s*,\s*\w", line) \
                 or re.search(r"spawn\s*\(\s*['\"]sh['\"]\s*,\s*\[\s*['\"]-c['\"]\s*,\s*\w", line) \
                 or re.search(r"child_process\s*\.\s*exec\s*\([^)]*\+", line) \
-                or re.search(r"execFile\s*\([^)]*[\"']-[ec][\"']", line):
+                or re.search(r"execFile\s*\([^)]*[\"']-[ec][\"']", line) \
+                or any(re.search(r"(?:exec|execSync|spawn|fork|execFile)\s*\([^)]*\b" + re.escape(v) + r"\b", line)
+                       for v in encoded_vars):
             issues.append({"file": rel, "line": i, "type": "命令注入",
                            "severity": "critical",
-                           "desc": "child_process 命令拼接动态内容：用户输入可注入 shell 命令",
+                           "desc": "child_process 命令执行（含编码混淆变量 String.fromCharCode/atob）：用户输入可注入 shell 命令",
                            "code": stripped[:100]})
             severity_count["critical"] += 1
 

@@ -29,7 +29,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.20"               # 工具版本（v4.9.19：50 轮 R1-R10——语义型 bug 启发式攻下 tornado#2/#4（TE chunked/Range 负偏移，修复版豁免）；CVE 变体 7 新规则（ghp_/JWT/AKIA 密钥/format 注入/shelve/条件表达式 SSRF/多行 f-string）；Java+5（MyBatis ${}/StringBuilder/FileChannel/setAttribute/WebView 桥）；JS+5（execFile -e/间接 eval/got/clone/常量豁免）；跨文件引擎升级（四层链 range(4)/request/req/r 缩写/容器内联源）；性能多重拼接与推导式查找；通用委托不一致检测+is None/True/False 豁免；878 测试全绿）
+VERSION = "4.9.21"               # 工具版本（v4.9.21：安全盲区终结战——PHP/Go/Rust/Kotlin 四语言安全扫描器（lang_security_rules）+ 混淆对抗泛化（chr/fromCharCode/atob 编码拼接、二次注入、jQuery .html()）+ 2026 CVE 组（zip/tar 解压穿越、AES 固定IV/DES-ECB/RSA短密钥）+ 树场×思维树强关联铁律（检测命令强制横幅 + SKILL 双文档白纸黑字）；40 新用例，1023 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头

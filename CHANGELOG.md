@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.21] - 2026-09-24
+
+### 🎯 安全盲区终结战（30轮 + 91轮外部检测报告驱动 · 1023 测试全绿）
+
+- **四语言安全扫描器（新增）**：PHP/Go/Rust/Kotlin 首次纳入安全扫描（`lang_security_rules.py`）——
+  PHP（SQLi 三形态/命令注入/unserialize/md5/include 动态）、Go（exec.Command/CommandContext/
+  fmt.Sprintf SQLi/http.Get SSRF/硬编码密钥）、Rust（Command::new/format! SQLi/unsafe 提示）、
+  Kotlin（Runtime.exec/ProcessBuilder/rawQuery/execSQL）；`_SECURITY_EXTS` 扩集闭合
+- **混淆对抗泛化（补 91 轮绕过）**：String.fromCharCode/atob/Buffer.from 编码变量追踪→命令调用、
+  二次注入（escape/quote 转义后仍拼接进 SQL/命令危险函数）、jQuery .html() 注入补捕
+- **2026 CVE 组**：zip/tar extractall 动态路径（Zip Slip/Tar Slip）、AES 固定 IV、
+  DES/ECB 弱加密、RSA 短密钥（<2048）
+- **🌳→🧠 树场×思维树 强关联铁律（乖宝钦点）**：检测命令（--security/--performance/--logic/
+  --all-checks/--static-ast）输出尾部强制追加"静态检测只完成 50%，须续跑思维树四维推理"横幅；
+  tree-farm SKILL 与 tree-of-thought SKILL 白纸黑字写明二段式协作协议
+- **新增 40 用例**：test_security_langs（21，四语言变体+负例）、test_security_obfuscation3（12）、
+  test_security_2026cve（7）；全量 983 → 1023 全绿，零回归
+
 ## [4.9.20] - 2026-09-23
 
 ### 🚀 35 轮递进测试 R11-R25（949 测试全绿）

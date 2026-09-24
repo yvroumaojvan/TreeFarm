@@ -1150,6 +1150,12 @@ try:
     from .js_extra_rules import _scan_js_extra_security, _scan_js_extra_file_level
 except Exception:
     _scan_js_extra_security = None
+try:
+    from .lang_security_rules import (_scan_php_security, _scan_go_security,
+                                      _scan_rust_security, _scan_kt_security)
+except Exception:
+    _scan_php_security = _scan_go_security = None
+    _scan_rust_security = _scan_kt_security = None
 
 
 def _scan_java_security(lines, issues, severity_count, rel):
@@ -1464,8 +1470,9 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
     SSRF、JWT、XXE、开放重定向、认证绕过"""
     # v4.8.3：加入 .java（走 _scan_java_security 启发式规则，见下）
     # v4.9.8：加入 .c/.h/.cpp（走 _scan_c_security 启发式规则）
+    # v4.9.21：加入 .php/.go/.rs/.kt（安全盲区终结战：四语言扫描器 lang_security_rules）
     _SECURITY_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".vue",
-                      ".java", ".c", ".h", ".cpp"}
+                      ".java", ".c", ".h", ".cpp", ".php", ".go", ".rs", ".kt"}
 
     issues = []
     severity_count = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1522,6 +1529,22 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "desc": "依赖未钉版本（==）：升级路径不可复现，建议固定版本（供应链可重复性）",
                                    "code": ln.strip()[:100]})
                     severity_count["low"] += 1
+            continue
+
+        # v4.9.21：安全盲区终结战——PHP/Go/Rust/Kotlin 四语言扫描器（lang_security_rules）
+        if ext == ".php":
+            _scan_php_security(lines, issues, severity_count, rel)
+            continue
+        if ext == ".go":
+            _scan_go_security(lines, issues, severity_count, rel)
+            continue
+        if ext == ".rs":
+            _scan_rust_security(lines, issues, severity_count, rel)
+            continue
+        if ext == ".kt":
+            _scan_kt_security(lines, issues, severity_count, rel)
+            ## v4.9.1：Kotlin 性能链（性能/复杂度）由上层 continue 后仍需代码行分析——
+            ## 这里只做安全扫描，完成后 continue（性能/逻辑在各自检测命令独立跑）
             continue
 
         # v4.8.3：Java 文件走专用启发式安全规则，跳过下方 Python 语法规则
@@ -1917,6 +1940,28 @@ def detect_security_issues(tree_files: List[str], root: Optional[str] = None) ->
                                    "severity": "high", "desc": desc, "code": stripped[:100]})
                     severity_count["high"] += 1
                     break
+
+            # P6（2026 CVE 组）：归档解压路径穿越（zip/tar extractall 到动态/变量路径）
+            if re.search(r"\.extractall\s*\([^)]*\+", line) \
+                    or re.search(r"\.extractall\s*\(\s*[A-Za-z_]\w*\s*\)", line):
+                issues.append({"file": rel, "line": i, "type": "路径遍历",
+                               "severity": "high",
+                               "desc": "归档解压到动态/相对路径：恶意压缩包可写任意路径（Zip Slip/Tar Slip），建议固定目录 + 成员名校验",
+                               "code": stripped[:100]})
+                severity_count["high"] += 1
+
+            # P6（2026 CVE 组）：Python 弱加密/弱密钥（固定 IV / DES-ECB / 短密钥 RSA）
+            m_rsa = re.search(r"RSA\.generate\s*\(\s*(\d+)\s*\)", line)
+            if re.search(r"[A-Za-z_]\w*\s*=\s*b[\"'](?:\\x00|0)+[\"']\s*\*", line) \
+                    or re.search(r"(?:AES|DES|DES3|ARC4|Blowfish)\.new\s*\([^)]*MODE_ECB", line) \
+                    or (m_rsa and int(m_rsa.group(1)) < 2048):
+                if m_rsa and int(m_rsa.group(1)) < 2048:
+                    desc = "弱密钥：RSA 密钥过短（可被分解破解），建议 ≥2048 位"
+                else:
+                    desc = "弱加密：固定IV/DES-ECB 可被破解，建议 AES-GCM + 随机nonce"
+                issues.append({"file": rel, "line": i, "type": "弱加密算法",
+                               "severity": "medium", "desc": desc, "code": stripped[:100]})
+                severity_count["medium"] += 1
 
             # 6. 弱哈希检测（v4.5收紧：只在密码/口令/凭据语境下报，指纹/校验和场景不算）
             hash_patterns = [
