@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.22] - 2026-09-25
+
+### 🔧 Go 命令注入形态修正（外部十轮验证答卷驱动）
+
+- **补漏最常见注入写法**：`exec.Command("sh","-c",v)` / `exec.Command("/bin/sh","-c",v)`（字面量开头+变量尾参）——此前只认"首参为变量"，现在改为"提取参数 → 剥离 CommandContext 的 context 首参 → 剥字符串字面量 → 剩余含变量即报"（泛化，识别任意动态参数形态）
+- **消除 CommandContext 误报**：`exec.CommandContext(ctx, "ls", "-l")` 的 ctx 是 context.Context 非注入源，剥离首参后不再误报；字符串字面量内单词不再被误当变量
+- **新增 3 用例**（GoSecurityTest：sh -c 纯变量 ×2 + ctx 负例 ×1）；全量 1023 → 1026 全绿
+
 ## [4.9.21] - 2026-09-24
 
 ### 🎯 安全盲区终结战（30轮 + 91轮外部检测报告驱动 · 1023 测试全绿）

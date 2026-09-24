@@ -84,15 +84,29 @@ def _scan_go_security(lines, issues, severity_count, rel):
         if not stripped or stripped.startswith(("//", "/*", "*")):
             continue
 
-        # 1) 命令注入：exec.Command/CommandContext/os.StartProcess/syscall.Exec + 拼接或变量参数
-        if re.search(r"(?i)(exec\.Command(?:Context)?\s*\(|os\.StartProcess\s*\(|syscall\.Exec\s*\()", stripped) \
-                and (" + " in stripped or "+" in stripped
-                     or re.search(r"Command(?:Context)?\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*(,|\))", stripped)):
-            issues.append({"file": rel, "line": i, "type": "命令注入",
-                           "severity": "critical",
-                           "desc": "Go 命令执行拼接动态内容/透传变量：可注入 shell 元字符，建议 exec.Command 参数化",
-                           "code": stripped[:100]})
-            severity_count["critical"] += 1
+        # 1) 命令注入：exec.Command/CommandContext/os.StartProcess/syscall.Exec
+        #    泛化（v4.9.22 按外部十轮验证修正）：提取调用参数 → 剥离 CommandContext 的
+        #    context 首参（ctx 不是注入源，防误报）→ 剩余参数含变量即报——
+        #    覆盖最常见漏检形态 exec.Command("sh","-c",v)/Command("/bin/sh","-c",v)
+        m_cmd = re.search(r"(?i)(?:exec\.)?Command(?:Context)?\s*\(([^)]*)\)", stripped)
+        m_proc = re.search(r"(?:os\.StartProcess|syscall\.Exec)\s*\(([^)]*)\)", stripped)
+        if m_cmd or m_proc:
+            args = (m_cmd or m_proc).group(1)
+            if m_cmd and "CommandContext" in stripped:
+                # context.Context 首参（ctx/context/c 惯用名）剥离——不是用户输入
+                args = re.sub(r'^\s*(?:ctx|context|c)\s*,\s*', '', args)
+            # 变量检测必须先剥掉字符串字面量（否则 "ls" 里的 ls 会被误当变量）
+            args_nolit = re.sub(r'"[^"]*"|\'[^\']*\'|`[^`]*`', '', args)
+            has_var = bool(re.search(r"\b[a-z_][a-z0-9_]*\b", args_nolit))
+            if has_var:
+                is_shell = bool(re.search(r"[\"'][^\"']*(?:sh|bash|cmd|zsh|powershell)[\"']\s*,\s*[\"']-c[\"']",
+                                          args))
+                issues.append({"file": rel, "line": i, "type": "命令注入",
+                               "severity": "critical",
+                               "desc": ("Go 命令执行含动态变量参数" + ("（shell 形态 sh -c 可注入任意命令）" if is_shell
+                                        else "：参数化命令名/参数可注入 shell 元字符")),
+                               "code": stripped[:100]})
+                severity_count["critical"] += 1
 
         # 2) SQL 注入：Query/Exec 类 + fmt.Sprintf 或拼接；含 ? 占位符直传参数豁免
         if re.search(r"(?i)\.(QueryContext|QueryRow|Query|ExecContext|Exec)\s*\(", stripped) \

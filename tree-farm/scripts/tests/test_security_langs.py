@@ -135,6 +135,48 @@ func run(name string) {
 ''', "命令注入", ".go")
         self.assertTrue(len(issues) >= 1, f"Go CommandContext 漏报: {issues}")
 
+    def test_cmdi_sh_c_var(self):
+        """外部十轮验证发现的漏检形态：字面量 sh + 纯变量参数"""
+        issues = issues_of('''\
+package main
+
+import "os/exec"
+
+func ping(ip string) {
+    out, _ := exec.Command("sh", "-c", ip).Output()
+    _ = out
+}
+''', "命令注入", ".go")
+        self.assertTrue(len(issues) >= 1, f"Go sh -c 纯变量漏报: {issues}")
+
+    def test_cmdi_bin_sh_c_var(self):
+        issues = issues_of('''\
+package main
+
+import "os/exec"
+
+func run(target string) {
+    _ = exec.Command("/bin/sh", "-c", target).Run()
+}
+''', "命令注入", ".go")
+        self.assertTrue(len(issues) >= 1, f"Go /bin/sh -c 纯变量漏报: {issues}")
+
+    def test_cmdi_ctx_no_fp(self):
+        """ctx 是 context.Context 类型，不是注入源——不得误报"""
+        issues = issues_of('''\
+package main
+
+import (
+    "context"
+    "os/exec"
+)
+
+func list(ctx context.Context) {
+    _ = exec.CommandContext(ctx, "ls", "-l")
+}
+''', "命令注入", ".go")
+        self.assertEqual([], issues, f"Go CommandContext(ctx, 常量) 误报: {issues}")
+
     def test_sqli_sprintf(self):
         issues = issues_of('''\
 package main
