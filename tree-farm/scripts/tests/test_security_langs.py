@@ -104,6 +104,49 @@ $stmt->execute();
 ''', "SQL注入", ".php")
         self.assertEqual([], issues, f"PHP 参数化负例误报: {issues}")
 
+    def test_upload_move_uploaded_file(self):
+        """CWE-434：上传文件名可控 + 未校验扩展名 → 任意文件上传"""
+        issues = issues_of('''\
+<?php
+$dest = "/var/www/uploads/" . $_FILES['f']['name'];
+move_uploaded_file($_FILES['f']['tmp_name'], $dest);
+''', "危险文件上传", ".php")
+        self.assertTrue(len(issues) >= 1, f"PHP 上传变量路径漏报: {issues}")
+
+    def test_upload_concat_dest(self):
+        issues = issues_of('''\
+<?php
+move_uploaded_file($_FILES['img']['tmp_name'], __DIR__ . "/upload/" . $fname);
+''', "危险文件上传", ".php")
+        self.assertTrue(len(issues) >= 1, f"PHP 上传拼接目标漏报: {issues}")
+
+    def test_upload_mime_only(self):
+        """只查 MIME 头不校验扩展名：可伪装 image/jpeg 传 webshell"""
+        issues = issues_of('''\
+<?php
+if ($_FILES['img']['type'] == "image/jpeg") {
+    move_uploaded_file($_FILES['img']['tmp_name'], "/up/" . $_FILES['img']['name']);
+}
+''', "危险文件上传", ".php")
+        self.assertTrue(len(issues) >= 1, f"PHP MIME-only 上传漏报: {issues}")
+
+    def test_upload_safe_ext_whitelist_no_fp(self):
+        """上传后做扩展名白名单校验 → 安全，不报"""
+        issues = issues_of('''\
+<?php
+$ext = pathinfo($_FILES['f']['name'], PATHINFO_EXTENSION);
+if (!in_array($ext, ['jpg', 'png', 'gif'])) { die("bad"); }
+move_uploaded_file($_FILES['f']['tmp_name'], "/up/" . $_FILES['f']['name']);
+''', "危险文件上传", ".php")
+        self.assertEqual([], issues, f"PHP 扩展名白名单负例误报: {issues}")
+
+    def test_single_line_php_tag(self):
+        """v4.9.22 答卷：<?php ... ?> 同一行时边缘形态不应漏"""
+        issues = issues_of('''\
+<?php $id = $_GET['id']; mysqli_query($conn, "SELECT * FROM users WHERE id = " . $id); ?>
+''', "SQL注入", ".php")
+        self.assertTrue(len(issues) >= 1, f"PHP 单行标签形态 SQLi 漏报: {issues}")
+
 
 class GoSecurityTest(unittest.TestCase):
     """Go 安全扫描（B1-P2）"""

@@ -13,6 +13,11 @@ import re
 
 def _scan_php_security(lines, issues, severity_count, rel):
     """PHP 安全规则（结构型）"""
+    # v4.9.23：文件级豁免——文件内出现扩展名白名单校验（pathinfo+in_array 各自任意行）则上传规则跳过
+    php_has_ext_whitelist = (
+        any(re.search(r"pathinfo\s*\([^)]*PATHINFO_EXTENSION", ln) for ln in lines)
+        and any(re.search(r"in_array\s*\([^)]*['\"][A-Za-z0-9]{2,}['\"]", ln) for ln in lines)
+    )
     for i, line in enumerate(lines, 1):
         if len(line) > 32768:
             line = line[:32768]  # 防 ReDoS：超长行截断（同 java_extra_rules）
@@ -20,13 +25,14 @@ def _scan_php_security(lines, issues, severity_count, rel):
         if not stripped or stripped.startswith(("//", "#", "/*", "*")):
             continue
 
-        # 1) SQL 注入：三种形态（占位符 ? 参数化一律豁免）
-        #    形态A：危险调用 + 变量直传/拼接（mysqli_query / ->query / ->exec / ->prepare）
-        #    形态B：赋值拼接/插值字符串 + SQL 关键字（$sql = "SELECT ... " . $var / {$var}）
+        # 1) SQL 注入：三种形态（代码注入一律豁免「真正的 SQL 占位符」——形态 =? / (?, / ?,) ）
+        #    v4.9.23：占位符用形态正则判定，而非「行含 ?」——<?php ?> 标签的 ? 不是占位符，
+        #    曾导致单行形态漏检（v4.9.22 答卷实锤）
         sql_call = re.search(r"(?i)(mysqli_query\s*\(|->\s*(?:query|exec|prepare)\s*\(|\bquery\s*\()", stripped)
         assign_sql = re.search(r"(?i)\$[a-z_]\w*\s*=\s*[\"']", stripped)
         sql_kw = re.search(r"(?i)(select|insert|update|delete|order\s+by|from)", stripped)
-        if "?" not in stripped and sql_kw:
+        has_sql_placeholder = re.search(r"=\s*\?|\?\s*[,)]|\(\s*\?", stripped)
+        if not has_sql_placeholder and sql_kw:
             if sql_call and re.search(r"\$\w|\.\s*\$", stripped):
                 issues.append({"file": rel, "line": i, "type": "SQL注入",
                                "severity": "critical",
@@ -48,6 +54,18 @@ def _scan_php_security(lines, issues, severity_count, rel):
                            "desc": "PHP 命令执行拼接用户可控内容：可逃逸执行任意命令",
                            "code": stripped[:100]})
             severity_count["critical"] += 1
+
+        # 2.5) 危险文件上传（CWE-434，v4.9.23 十轮验证答卷新增）——
+        #      move_uploaded_file 目标/文件名含 $_FILES 或拼接；文件有扩展名白名单校验则豁免
+        if re.search(r"\bmove_uploaded_file\s*\(", stripped) \
+                and re.search(r"\$_FILES|\$\w+\s*\.|\.\s*\$\w+", stripped) \
+                and not php_has_ext_whitelist:
+            issues.append({"file": rel, "line": i, "type": "危险文件上传",
+                           "severity": "high",
+                           "desc": "PHP 文件上传目标/文件名含用户可控内容（$_FILES/变量拼接/仅MIME校验）："
+                                   "可上传任意文件（CWE-434），建议扩展名白名单+类型二次校验",
+                           "code": stripped[:100]})
+            severity_count["high"] += 1
 
         # 3) 反序列化：unserialize( 直收超全局变量（$_GET/$_POST/$_COOKIE/$_REQUEST）
         if re.search(r"\bunserialize\s*\(\s*\$_(?:GET|POST|REQUEST|COOKIE|FILES)\[", stripped):
