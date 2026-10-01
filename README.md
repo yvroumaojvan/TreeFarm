@@ -17,10 +17,10 @@
 
 ---
 
-## ★ 实测战绩（2026-09-25 更新，v4.9.23）
+## ★ 实测战绩（2026-10-02 更新，v4.9.25）
 
-🏆 **最新战绩（2026-09-25，v4.9.23）**：**答卷三件套收口**——PHP 危险文件上传（CWE-434：move_uploaded_file 变量/MIME-only + 扩展名白名单豁免）、PHP 单行标签 `<?php ... ?>` 形态修复（占位符形态正则）、CI 超时加固 15min；**1031 测试全绿**（29 语言用例 + 5 新用例），已推 GitHub d73461d。
-上一版（v4.9.21/22，2026-09-24）：四语言安全扫描器（PHP/Go/Rust/Kotlin）+ 混淆对抗泛化（String.fromCharCode/atob/Buffer.from/二次注入）+ 2026 CVE 组（Zip Slip/Tar Slip/AES 固定 IV/DES-ECB/RSA<2048）+ Go 命令注入形态修正，**1023 测试全绿**。
+🏆 **最新战绩（2026-10-02，v4.9.25）**：**A 系列收官（外部 AI 报告驱动）**——①手机沙箱规则一致性（subprocess 补 format 字符串逃逸 + importlib 黑名单，对齐 restricted）②发版一致性检查 release_check.py（版本单一来源）③**Deep Scan 提速**（静态检测收窄到核心树+安全核心，全仓库 180s→10.8s，~17 倍）④函数查重 Jaccard 数学上界剪枝（严格不丢真阳性）；**1031 测试全绿**。
+上一版（v4.9.24，2026-10-02）：工程质量轮——沙箱 RLIMIT_AS 最低 512MB（Linux 256MB 致 pthread_create 失败）、测试靶场隔离（--include-tests）、README 版本同步、强关联横幅 v2（分开测=无效验收）、SyntaxWarning 修复；**1031 测试全绿**。
 
 历史战绩（2026-08-08，v3.0 已更新）：真实 APK 项目实测（自动点击器 2.0.12.31，21MB / 9,187 个 Java 文件）：
 

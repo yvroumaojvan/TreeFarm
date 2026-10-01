@@ -5,6 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.25] - 2026-10-02
+
+### 🎯 A 系列收官（外部 AI 报告驱动 · 科研分支 cherry-pick）
+
+- **手机沙箱规则一致性**：subprocess 静态检查补齐 restricted 的 format 字符串逃逸检查（`'{0.__class__}'.format`）+ importlib 黑名单（`importlib.import_module('os')` 逃逸）——GPT 实测的第一优先移动端问题。
+- **发版一致性检查** `scripts/release_check.py`：VERSION（common.py 单一来源）与 README/测试断言/CHANGELOG 首条一致性校验，`--fix` 自动同步（GPT P1 版本源）。
+- **Deep Scan 提速**：--deep 静态检测从全量 tree 收窄到核心树+安全核心文件（跨文件污点/共性仍成立），配合测试靶场隔离，全仓库 deep 从 >180s 降到 10.8s（~17 倍）。
+- **函数查重剪枝**：detect_duplicate_func_pairs 加 Jaccard 数学上界剪枝（Jaccard ≤ min/max，低于阈值免算交集，严格不丢真阳性）。
+- 全量 **1031 测试全绿**（deep 16 + dup 12 专项通过）。
+
 ## [4.9.24] - 2026-10-02
 
 ### 🎯 外部 AI 实跑报告驱动 · 工程质量轮（含强关联横幅 v2）

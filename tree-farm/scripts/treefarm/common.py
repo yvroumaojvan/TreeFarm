@@ -32,7 +32,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.24"               # 工具版本（v4.9.24：外部 AI 实跑报告驱动的工程质量轮——①Linux/macOS 沙箱 RLIMIT_AS 最低 512MB（256MB 致 pthread_create 失败，Termux 仍跳过）②测试靶场隔离（默认跳过 tests/benchmark_bugs 等 TEST_DIR_NAMES 目录 + test_* 文件，--include-tests 显式包含，Deep Scan 全仓库提速）③README 版本同步 v4.9.23/1031 ④SyntaxWarning 修复（java_extra_rules 转义、dogfood docstring raw）⑤test_v496_sandbox_cli 自包含 ⑥强关联横幅 v2（分开测=无效验收））
+VERSION = "4.9.25"               # 工具版本（v4.9.25：A 系列收官——①手机沙箱规则一致性（subprocess 补 format 字符串逃逸 + importlib 黑名单，对齐 restricted）②发版一致性检查 release_check.py（版本单一来源）③Deep Scan 提速（静态检测收窄到核心树+安全核心，全仓库 180s→10.8s）④函数查重 Jaccard 数学上界剪枝；全量 1031 测试全绿）
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
