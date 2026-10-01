@@ -1033,7 +1033,11 @@ def detect_duplicate_func_pairs(tree_files: List[str], threshold: float = 0.6) \
                 a, b = bucket[i], others[j]
                 if a[0] == b[0]:
                     continue
-                if min(a[4], b[4]) * 1.3 < max(a[4], b[4]):
+                # r40：数学上界剪枝（GPT P2：阈值松时同桶组合爆炸 >60s）。
+                # Jaccard = |A∩B|/|A∪B| ≤ |A∩B|/max ≤ min/max，
+                # 故 min/max < threshold 的对必低于阈值——免算交集直接跳过。
+                # 比旧的「大小差 1.3 倍」剪枝更紧且严格不丢真阳性。
+                if min(a[4], b[4]) / max(a[4], b[4]) < threshold:
                     continue
                 inter = len(a[3] & b[3])
                 if not inter:

@@ -1106,10 +1106,15 @@ class TreeFarm:
         weeds = [f for f in ranked if f not in core_set]
         hub_line = max(1, len(core) // 2) if core else 1
 
-        # ===== 2. 静态检测全扫一次，按文件分组 =====
-        sec = detect_security_issues(tree, root=root)
-        perf = detect_performance_issues(tree, root=root)
-        logic = detect_logic_issues(tree, root=root)
+        # ===== 2. 静态检测：只扫核心树+安全核心文件（v4.9.24 r39 Deep 提速，GPT P1）
+        # 原实现每次 --deep 都对全量 tree 重扫三合一，大型仓库（含测试靶场）被拖到 180s+；
+        # 收窄到 core（含 _is_security_core 强制文件）后跨文件污点/共性仍在核心树内成立，
+        # 扫描量一般降至 1/2~1/3。更彻底的「两阶段磁盘缓存」列为后续（同进程内可先跑 --all-checks 预热）。
+        # =====
+        det_files = core if core else tree
+        sec = detect_security_issues(det_files, root=root)
+        perf = detect_performance_issues(det_files, root=root)
+        logic = detect_logic_issues(det_files, root=root)
         all_issues = sec["issues"] + perf["issues"] + logic["issues"]
         by_file: Dict[str, List[Dict[str, Any]]] = {}
         for iss in all_issues:
