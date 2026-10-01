@@ -105,8 +105,9 @@ function scoreRobustness(e) {
   } else if (res.length === 1) {
     score += 2;                                   // 只有一次 = 可能偶然
   }
-  const variantCount = (Number(e.inputs) || 0) + (Number(e.seeds) || 0);
-  if (variantCount >= 2) score += 5;              // 换过输入/种子仍成立
+  // GPT 审修复：换输入/换种子分必须由真实多变体实验证明（variant_verified），
+  // 纯数字声明（inputs/seeds 计数）不再给分——否则"同代码跑三次"就能冒充可重复。
+  if (e.variant_verified === true) score += 5;
   return clampTo(score, 20);
 }
 
@@ -161,18 +162,29 @@ function scoreInnovation(evidence) {
      dims.experiment + dims.robustness + dims.evidence) * 100
   ) / 100;
   let level;
+  // GPT 审修复：L4 硬门槛 = 必须有可重复证据——
+  // reproduced（明确声明重复验证）或 variant_verified（真实换输入/种子实验）或
+  // repeated_same_input（同输入 ≥3 次）。只跑一次 + 写句 novelty_check 不得进 L4。
+  const reproducible = (evidence.reproduced === true ||
+                        evidence.variant_verified === true ||
+                        evidence.repeated_same_input === true);
   if (total >= 85) {
     // L5 硬门槛：可复现的新知识必须经过外部独立验证（GPT：其他人也能得到类似结论）
     if (evidence.external_verified === true) level = 'L5';
     else level = 'L4'; // 高分但缺外部验证 → 按 L4 计（硬门槛机制）
-  } else if (total >= 65) level = 'L4';
-  else if (total >= 40) level = 'L3';
+  } else if (total >= 65) {
+    level = reproducible ? 'L4' : 'L3'; // 高分但缺可重复证据 → 降 L3（GPT 审伪 L4 修复）
+  } else if (total >= 40) level = 'L3';
   else if (total >= 20) level = 'L2';
   else level = 'L1';
-  const note = (total >= 85 && evidence.external_verified !== true)
-    ? '总分达到 L5 区间但缺少外部独立验证（external_verified），按硬门槛降为 L4'
-    : undefined;
-  return { dims, total, level, ...(note ? { note } : {}) };
+  const notes = [];
+  if (total >= 85 && evidence.external_verified !== true) {
+    notes.push('总分达到 L5 区间但缺少外部独立验证（external_verified），按硬门槛降为 L4');
+  }
+  if (total >= 65 && !reproducible) {
+    notes.push('总分达到 L4 区间但缺少可重复证据（reproduced/variant_verified/repeated_same_input），按硬门槛降为 L3');
+  }
+  return { dims, total, level, ...(notes.length ? { notes } : {}) };
 }
 
 /** CLI 入口 */

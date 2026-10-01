@@ -46,13 +46,28 @@ t('L4 可重复创新', () => {
     code: true, ran: true,
     results: [68.2, 66.9, 67.4, 67.1, 66.8],
     baseline: 80.1,
-    inputs: 3, seeds: 2,
+    inputs: 3, seeds: 2, variant_verified: true,
     novelty_check: '检索未见同构方案，无先例，与已有 LSH 不是重复',
   });
   assert.strictEqual(r.level, 'L4');
   assert.ok(r.dims.robustness >= 15);
   assert.ok(r.dims.evidence >= 6);
   assert.ok(r.note);   // 总分达到 L5 区间但缺外部验证 → 硬门槛降 L4 并给提示
+});
+
+// 3b) GPT 审修复：伪 L4 复现——只跑一次 + 写句 novelty_check → 不得进 L4
+t('伪L4拦截：单次实验不得进L4（GPT审案例）', () => {
+  const r = scoreInnovation({
+    scheme: '候选比 baseline 好一点点',
+    different: true,
+    code: true, ran: true,
+    results: [11],   // 只跑 1 次
+    baseline: 10,
+    novelty_check: '检索未见同构方案',
+    inputs: 1, seeds: 1,
+  });
+  assert.strictEqual(r.level, 'L3');   // 必须降级（缺可重复证据）
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
 });
 
 // 4) 边界保护：非法数值输入 → 拒绝评分（防 NaN，GPT 挖的坑）

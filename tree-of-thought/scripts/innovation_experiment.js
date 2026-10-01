@@ -59,16 +59,63 @@ function main() {
   console.log('🧪 实验开始：' + s.idea);
   console.log('   内核：' + s.seed + ' | 表达形式：' + s.form);
 
+  // 0) 正确性验证（GPT 审 #6：print(999999) 冒充结果必须被拦）——
+  //    scheme 提供 test_cases[{input,expected}] + func 时，指标比较前先验证候选正确性
+  if (s.func && Array.isArray(s.test_cases) && s.test_cases.length) {
+    console.log('\n[0/5] 验证候选正确性（test_cases ×' + s.test_cases.length + '）……');
+    let v;
+    try {
+      v = runPython('--code', s.code, '--verify', JSON.stringify({ func: s.func, cases: s.test_cases }));
+    } catch (e) {
+      try { v = JSON.parse(e.stdout); } catch (_) { v = { ok: false, passed: 0, total: 0, error: e.message }; }
+    }
+    if (!v.ok) {
+      console.log('   ❌ 候选正确性未通过：' + (v.passed || 0) + '/' + (v.total || 0) + ' 用例（错误用例：' + JSON.stringify(v.failures || []) + '）');
+      console.log('   —— 错误方案比 baseline 再快也不算数，失败原因存入记忆库');
+      const memArgs = ['save', JSON.stringify({
+        seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
+        code: true, ran: false, improved: false,
+        failure_reason: '候选正确性未通过（' + (v.passed || 0) + '/' + (v.total || 0) + '）：' + JSON.stringify(v.failures || []),
+        results: [], baseline: undefined,
+        inputs: 0, seeds: 0,
+        different: s.different !== undefined ? s.different : undefined,
+      })];
+      if (memFile) memArgs.push('--file', memFile);
+      try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 记忆存档异常：' + e2.message); }
+      console.log('\n❌ 实验中止（候选不正确），失败原因已记录。');
+      process.exit(1);
+    }
+    console.log('   ✅ 正确性通过：' + v.passed + '/' + v.total + ' 用例全部正确');
+  }
+
   // 1) baseline
   console.log('\n[1/4] 跑 baseline……');
   const base = runPython('--code', s.baseline_code, '--measure', measure, '--repeat', String(repeat));
   if (!base.ok) fail('baseline 执行失败：' + base.error);
   const baseArr = measure === 'time' ? base.times_ms : base.values;
 
-  // 2) 候选
+  // 2) 候选（GPT 审：失败也必须存记忆——失败数据比成功更有价值）
   console.log('[2/4] 跑候选方案……');
-  const cand = runPython('--code', s.code, '--measure', measure, '--repeat', String(repeat));
-  if (!cand.ok) fail('候选执行失败：' + cand.error + ' —— 失败原因将存入记忆库');
+  let cand = null, candErr = '';
+  try {
+    cand = runPython('--code', s.code, '--measure', measure, '--repeat', String(repeat));
+  } catch (e) { candErr = e.message; }
+  if (!cand || !cand.ok) {
+    const err = candErr || (cand && cand.error) || '未知错误';
+    console.log('   候选执行失败：' + err + ' —— 失败原因存入记忆库');
+    const memArgs = ['save', JSON.stringify({
+      seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
+      code: true, ran: false, improved: false,
+      failure_reason: '候选执行失败：' + err,
+      results: [], baseline: undefined,
+      inputs: 0, seeds: 0, novel: s.novel,
+      different: s.different !== undefined ? s.different : undefined,
+    })];
+    if (memFile) memArgs.push('--file', memFile);
+    try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 失败记忆存档异常：' + e2.message); }
+    console.log('\n❌ 实验中止（候选失败），失败原因已记录。');
+    process.exit(1);
+  }
   const candArr = measure === 'time' ? cand.times_ms : cand.values;
 
   // 3) 对比
@@ -87,12 +134,16 @@ function main() {
     seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
     code: true, ran: true,
     results: candArr, baseline: baseAvg,
-    improved: better, reproduced: repeat >= 2,
+    // GPT 审修复：reproduced 不再由 repeat>=2 冒充——科研重复 = 同输入多次稳定
+    // + 换输入/换种子仍成立（variant_verified 必须由真实多变体实验证明）
+    reproduced: false,
+    repeated_same_input: repeat >= 3,
+    variant_verified: Array.isArray(s.variant_results) && s.variant_results.length >= 2,
     inputs: Array.isArray(s.inputs) ? s.inputs.length : 1,
-    seeds: 1,
+    seeds: s.seeds !== undefined ? s.seeds : 1,
     novelty_check: s.novelty_check || '',
     failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + Math.round(candAvg * 100) / 100 + ' vs baseline ' + Math.round(baseAvg * 100) / 100 + '）'),
-    different: true,
+    different: s.different !== undefined ? s.different : undefined,
   })];
   if (memFile) memArgs.push('--file', memFile);
   try {

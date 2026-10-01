@@ -127,10 +127,16 @@ if (cmd === 'idea') {
   var sc;
   try { sc = JSON.parse(cmdArgs[2]); } catch (e) { fail('评分JSON解析失败：' + e.message); }
   // 创新模式评分：relevance(适配内核) 35% + novelty(新颖度) 40% + expressiveness(表达力) 15% + feasibility(可实现) 10%
+  // r41（GPT 审）：对齐 innovation_score.js 的边界保护——非法数值（非数字/NaN/越界）直接拒绝，防 NaN 评分
   var r = Number(sc.relevance || 0);
   var nv = Number(sc.novelty || 0);
   var ex = Number(sc.expressiveness || 0);
   var fe = Number(sc.feasibility || 0);
+  for (var _kv of [['relevance', r], ['novelty', nv], ['expressiveness', ex], ['feasibility', fe]]) {
+    if (Number.isNaN(_kv[1]) || !Number.isFinite(_kv[1]) || _kv[1] < 0 || _kv[1] > 10) {
+      fail('评分非法：' + _kv[0] + '=' + _kv[1] + ' 必须是 0~10 的数字（GPT 审边界保护）');
+    }
+  }
   var total = r * 0.35 + nv * 0.40 + ex * 0.15 + fe * 0.10;
   s.nodes[sid].score = { relevance: r, novelty: nv, expressiveness: ex, feasibility: fe, total: Math.round(total * 100) / 100 };
   s.nodes[sid].status = 'scored';
