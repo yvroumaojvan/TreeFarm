@@ -161,7 +161,7 @@ def _scan_java_extra_file_level(lines, issues, severity_count, rel):
         if re.search(r"@(?:Select|Update|Insert|Delete)\s*\(\s*\"[^\"]*\$\{", line):
             issues.append({"file": rel, "line": i, "type": "SQL注入",
                            "severity": "critical",
-                           "desc": "MyBatis ${} 直接拼接：用户输入可注入 SQL，应改用 #{}(#\{\} 参数化)",
+                           "desc": "MyBatis ${} 直接拼接：用户输入可注入 SQL，应改用 #{}（#{} 参数化）",
                            "code": stripped[:100]})
             severity_count["critical"] += 1
 

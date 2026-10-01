@@ -52,8 +52,9 @@ def _is_security_core(path: str) -> bool:
 
 
 class TreeFarm:
-    def __init__(self, root: str):
+    def __init__(self, root: str, include_tests: bool = True):
         self.root = root
+        self.include_tests = include_tests
         self.scanned: Optional[Dict[str, List[str]]] = None
         self.bank: Optional[GeneBank] = None
         self.weed_index: Optional[WeedIndex] = None
@@ -83,7 +84,8 @@ class TreeFarm:
         scan_cfg = cfg.get("scan", {}) if isinstance(cfg, dict) else {}
         self.scanned = scan(self.root,
                             ignore_patterns=scan_cfg.get("ignore") if isinstance(scan_cfg, dict) else None,
-                            ignore_dirs=scan_cfg.get("ignore_dirs") if isinstance(scan_cfg, dict) else None)
+                            ignore_dirs=scan_cfg.get("ignore_dirs") if isinstance(scan_cfg, dict) else None,
+                            skip_test_dirs=not self.include_tests)
         tree_files = self.scanned["tree"]
 
         self.weed_index = WeedIndex()

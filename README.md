@@ -6,17 +6,21 @@
 
 `零依赖` `纯 Python + Node` `Apache 2.0` `多语言` `适配 Claude / Qwen / Cursor / Windsurf / Gemini CLI`
 
+## 🚨 树场 × 思维树 = 强关联铁律（必读，禁止分开验收）
+
+> **TreeFarm 完整能力 = 树场（静态分析 50%） × 思维树（四维推理 50%）强关联。**
+> 树场输出的是「候选问题清单」，思维树负责对 🔴严重/🟠高危 逐条做四维分支推理（evidence/relevance/novelty/verifiable），
+> 评分 ≥0.75 确认根因后才能输出「根因 + 修复方案」。
+> **只跑静态分析 = 任务只完成 50%；只跑思维树没跑树场 = 没有候选输入。**
+> **任何把树场和思维树分开测、分开验收的行为 = 无效验收（0 分）。**
+> 使用本插件的 AI 必须执行「树场给候选 → 思维树四维推理 → 三件套交付」的二段式协议。
+
 ---
 
-## ★ 先看实测战绩（2026-09-07 更新，v4.9.8）
+## ★ 实测战绩（2026-09-25 更新，v4.9.23）
 
-🏆 **最新战绩（2026-09-07，v4.9.8）**：**C/C++ 函数级分析上线**——函数提取/调用图/类继承/
-复杂度/死代码/跨文件基因/安全规则全覆盖（此前 C/C++ 仅 import 级正则）。十轮攻坚实测：
-**模型加持相对提升 400%**（cproj 0.4→2 信号、psutil 7.6→38 信号，远超 200% 目标）；
-误报治理 150 系统头文件 **0 误报**；tornado 6.1 金标准 0/100 A 保持；499 测试全绿。
-
-历史战绩（2026-09-06，v4.9.6/7）：OWASP 对抗靶场 11 样例——应报 8 全中、对照 3 全不报；
-BugsInPy tornado 8 bug 功能全开 8/8 定位根因（静态规则 3/8 结构型 100% + 思维树兜底语义型）。
+🏆 **最新战绩（2026-09-25，v4.9.23）**：**答卷三件套收口**——PHP 危险文件上传（CWE-434：move_uploaded_file 变量/MIME-only + 扩展名白名单豁免）、PHP 单行标签 `<?php ... ?>` 形态修复（占位符形态正则）、CI 超时加固 15min；**1031 测试全绿**（29 语言用例 + 5 新用例），已推 GitHub d73461d。
+上一版（v4.9.21/22，2026-09-24）：四语言安全扫描器（PHP/Go/Rust/Kotlin）+ 混淆对抗泛化（String.fromCharCode/atob/Buffer.from/二次注入）+ 2026 CVE 组（Zip Slip/Tar Slip/AES 固定 IV/DES-ECB/RSA<2048）+ Go 命令注入形态修正，**1023 测试全绿**。
 
 历史战绩（2026-08-08，v3.0 已更新）：真实 APK 项目实测（自动点击器 2.0.12.31，21MB / 9,187 个 Java 文件）：
 
@@ -85,12 +89,12 @@ TreeOfThought+TreeFarm(融合版)/
 │       ├── tree-search.js      #   ★ 树搜索管理器（零依赖 Node，v3 新增）
 │       ├── render-tree.js      #   推理 JSON / 搜索状态 → 文字符号树（含状态徽章）
 │       └── test_tree_search.js #   树搜索 14 个测试（node test_tree_search.js）
-├── tree-farm/                  # ★ 技能 2：树场 v4.9.8（Agent Skills 标准格式）
-│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.9.8 同步）
+├── tree-farm/                  # ★ 技能 2：树场 v4.9.24（Agent Skills 标准格式）
+│   ├── SKILL.md                #   两级状态机 + 树场工作流（v4.9.24 同步）
 │   └── scripts/
-│       ├── tree_farm.py        #   树场引擎 v4.9.8 入口（纯 Python 标准库，SQLite 存储）
+│       ├── tree_farm.py        #   树场引擎 v4.9.24 入口（纯 Python 标准库，SQLite 存储）
 │       ├── treefarm/           #   ★ 多模块包（common/parser/storage/config/analysis/core/cli/sandbox/spec）
-│       ├── tests/              #   499 个 unittest 测试（python3 -m unittest discover -s tests）
+│       ├── tests/              #   1031 个 unittest 测试（python3 -m unittest discover -s tests）
 │       └── apk_analyze.sh      #   APK 一条龙脚本（反编译 → 树场）
 └── examples/
     ├── 完整输出示例.md          # 思维树文字树效果（完整/紧凑/ASCII）
@@ -153,7 +157,7 @@ python3 tree-farm/scripts/tree_farm.py examples/demo_project
 # 树场：AI 工作简报（省 token 核心）
 python3 tree-farm/scripts/tree_farm.py examples/demo_project --brief
 
-# 跑全部测试（Python 499 个 + Node 14 个）
+# 跑全部测试（Python 1031 个 + Node 43 个）
 python3 -m unittest discover -s tree-farm/scripts/tests
 node tree-of-thought/scripts/test_tree_search.js
 

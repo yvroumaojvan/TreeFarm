@@ -5,6 +5,19 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## [4.9.24] - 2026-10-02
+
+### 🎯 外部 AI 实跑报告驱动 · 工程质量轮（含强关联横幅 v2）
+
+外部 AI 对 v4.9.23 实跑（1031 Python 测试 + 43 Node 测试 + 沙箱阈值实验 + 强关联闭环重测，评分 79→82/100）后给出的修复清单落地：
+
+- **Linux/macOS 沙箱 RLIMIT_AS 最低 512MB**：实测 256MB 会让 Python 子进程线程初始化失败（pthread_create → Resource temporarily unavailable → return code 255）；512MB 起可用。Termux 路径继续跳过 RLIMIT_AS（bionic MapShadow 兼容）。
+- **测试靶场隔离（--include-tests）**：默认扫描跳过 `tests/`/`benchmark_bugs/`/`fixtures/` 等故意造漏洞的目录（TEST_DIR_NAMES）+ `test_*`/`*_test.py` 文件；Deep Scan 扫大型仓库不再被自己的测试靶场拖慢/污染，`--include-tests` 可显式包含。
+- **README 版本同步**：v4.9.8/499 → v4.9.23→v4.9.24/1031（发行工程缺陷修复）。
+- **SyntaxWarning 修复**：java_extra_rules.py `#\{\}` 无效转义、test_v4915_dogfood.py docstring `\|`（Python 3.13+ 警告）。
+- **test_v496_sandbox_cli.py 自包含**：仓库根目录直接运行不再 ModuleNotFoundError。
+- **强关联横幅 v2**：cli 检测输出尾部横幅明确「禁止把树场和思维树分开测、分开验收——分开测 = 无效验收（0 分）」。
+
 ## [4.9.23] - 2026-09-25
 
 ### 🎯 v4.9.22 答卷三件套收口（全量 1031 测试全绿）

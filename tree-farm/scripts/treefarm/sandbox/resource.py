@@ -53,9 +53,13 @@ class ResourceLimiter:
             # 实测 AS=256MB 和 AS=2GB 都会触发
             # 'MapShadow CHECK p != MAP_FAILED failed' → SIGABRT(rc=-6)。
             # 手机端物理内存由系统管理（有 OOM 兜底），虚拟内存限制只有误杀。
-            # 非 Termux（桌面 Linux/macOS）保持 AS 限制（防内存炸弹）。
+            # 非 Termux（桌面 Linux/macOS）保持 AS 限制（防内存炸弹），
+            # 但最低抬到 512MB：实测 AS=256MB 会让 Python 子进程
+            # 线程初始化失败（pthread_create → 'Resource temporarily unavailable'，
+            # return code 255）；512MB 起可用。
             if not self._is_termux():
-                mem_bytes = self.max_memory_mb * 1024 * 1024
+                as_mb = max(self.max_memory_mb, 512)
+                mem_bytes = as_mb * 1024 * 1024
                 resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
             # CPU 时间限制（秒）
             resource.setrlimit(resource.RLIMIT_CPU, (self.max_cpu_seconds, self.max_cpu_seconds))

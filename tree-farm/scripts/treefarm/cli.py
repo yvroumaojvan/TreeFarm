@@ -136,15 +136,17 @@ from .sandbox import SandboxRunner, SandboxConfig
 # ============================================================
 _TREE_ASSOC_FOOTER = (
     "\n"
-    "═══════════════════════════════════════════════════\n"
-    "🌳→🧠 【树场·思维树 强关联铁律】静态检测只完成 50%！\n"
+    "════════════════════════════════════════════════════════════\n"
+    "🌳→🧠 【树场·思维树 强关联铁律 v2】静态检测只完成 50%！\n"
     "上面的结果只是「候选问题清单」。下结论必须二段式：\n"
     "① 对 🔴严重/🟠高危 问题，逐个开「思维树」四维分支推理\n"
     "   （evidence证据/relevance相关/novelty新颖/verifiable可验证，\n"
     "    有终端用 node tree-of-thought/scripts/tree-search.js 维护分支）；\n"
     "② 四维评分 ≥0.75 确认根因后，才能输出「根因+修复方案」。\n"
-    "只跑静态分析 = 任务未完成（TreeFarm 完整能力 = 树场 × 思维树强关联）。\n"
-    "═══════════════════════════════════════════════════\n"
+    "⚠️ 禁止把树场和思维树分开测、分开验收 —— 分开测 = 无效验收（0 分）。\n"
+    "⚠️ 只跑静态分析 = 任务未完成（50%）；只跑思维树没跑树场 = 没有候选输入。\n"
+    "TreeFarm 完整能力 = 树场 × 思维树 强关联（二段式协议：候选 → 四维推理 → 交付）。\n"
+    "════════════════════════════════════════════════════════════\n"
 )
 
 
@@ -784,7 +786,9 @@ def main() -> None:
         print("   查看帮助: python3 tree_farm.py --help")
         return
 
-    farm = TreeFarm(root)
+    # v4.9.24：测试靶场隔离——默认跳过 tests/benchmark_bugs 等目录（Deep Scan 提速），
+    # --include-tests 可显式包含测试代码（分析测试靶场本身时用）。
+    farm = TreeFarm(root, include_tests="--include-tests" in args)
     try:
         if "--repl" in args or any(a in ("交互", "交互模式", "问答模式") for a in args):
             _repl(farm, root)

@@ -21,6 +21,9 @@ WEED_EXTS = {".json", ".txt", ".md", ".png", ".jpg", ".jpeg", ".gif", ".xml",
              ".yml", ".yaml", ".html", ".css", ".svg", ".csv", ".ini"}
 CODE_EXTS = {".py", ".js", ".ts", ".java", ".kt", ".c", ".h", ".cpp", ".go", ".rs"}
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "build", "dist", ".idea", ".vscode"}
+# v4.9.24：测试靶场隔离——默认扫描跳过故意造漏洞的测试目录（Deep Scan 全仓库提速关键）。
+# 目录名精确匹配（整棵子树跳过）+ 文件前缀匹配（test_*.py / *_test.py 等）。
+TEST_DIR_NAMES = {"tests", "test", "benchmark_bugs", "fixtures", "testdata", "specs"}
 
 SMALL_TREE_RATIO = 0.10          # 小树激活阈值：基因数 / 核心文件数
 TRASH_WINDOW = 3                 # 垃圾箱熔断滑动窗口（小鸟来回次数）
@@ -29,7 +32,7 @@ CONVERGE_LIMIT = 2               # 一轮新增小鸟 ≤N 只 = 收敛
 WEAK_CONFIRM_LIMIT = 2           # 弱耦合需 ≥N 个独立分支确认
 
 SCHEMA_VERSION = 3               # 基因格式 schema 版本（v3：新增 call/inherit 关系）
-VERSION = "4.9.23"               # 工具版本（v4.9.23：v4.9.22 答卷三件套——PHP 危险文件上传 CWE-434（move_uploaded_file 变量/MIME-only，扩展名白名单豁免）+ PHP 单行标签 <?php...?> 形态修复（占位符形态正则，? > 误豁免根因）+ CI 超时 15min；29 语言测试+5 新用例，1031 全绿）
+VERSION = "4.9.24"               # 工具版本（v4.9.24：外部 AI 实跑报告驱动的工程质量轮——①Linux/macOS 沙箱 RLIMIT_AS 最低 512MB（256MB 致 pthread_create 失败，Termux 仍跳过）②测试靶场隔离（默认跳过 tests/benchmark_bugs 等 TEST_DIR_NAMES 目录 + test_* 文件，--include-tests 显式包含，Deep Scan 全仓库提速）③README 版本同步 v4.9.23/1031 ④SyntaxWarning 修复（java_extra_rules 转义、dogfood docstring raw）⑤test_v496_sandbox_cli 自包含 ⑥强关联横幅 v2（分开测=无效验收））
 DB_FILE = "tree_farm.db"         # 全部状态统一存一个 SQLite 文件
 
 READ_HEAD_BYTES = 2000           # 内容匹配只读文件头
@@ -202,10 +205,13 @@ def _matches_ignore(rel: str, patterns: Optional[List[str]]) -> bool:
 
 
 def scan(root: str, ignore_patterns: Optional[List[str]] = None,
-         ignore_dirs: Optional[List[str]] = None) -> Dict[str, List[str]]:
-    """扫描项目文件（v3.2：支持 .gitignore 风格忽略规则 + 额外忽略目录）。
+         ignore_dirs: Optional[List[str]] = None,
+         skip_test_dirs: bool = False) -> Dict[str, List[str]]:
+    """扫描项目文件（v3.2：支持 .gitignore 风格忽略规则 + 额外忽略目录；
+    v4.9.24：新增 skip_test_dirs 测试靶场隔离）。
     ignore_patterns: 相对路径 glob（**/vendor/**、*.min.js、build/ 等）；
-    ignore_dirs: 目录名列表（精确匹配，整棵子树跳过）。"""
+    ignore_dirs: 目录名列表（精确匹配，整棵子树跳过）；
+    skip_test_dirs: True 时跳过 TEST_DIR_NAMES 目录 + test_* / *_test 文件。"""
     result: Dict[str, List[str]] = {"weed": [], "tree": [], "other": []}
     # v4.5 修复：单文件项目 - os.walk(文件) 返回空，需单独处理
     if os.path.isfile(root):
@@ -218,6 +224,8 @@ def scan(root: str, ignore_patterns: Optional[List[str]] = None,
         for d in dirnames:
             if d in SKIP_DIRS or d.startswith(".") or d in ignore_dirs:
                 continue
+            if skip_test_dirs and d in TEST_DIR_NAMES:
+                continue
             if rel_dir != "." and _matches_ignore(os.path.join(rel_dir, d), ignore_patterns):
                 continue
             kept.append(d)
@@ -226,6 +234,8 @@ def scan(root: str, ignore_patterns: Optional[List[str]] = None,
             full = os.path.join(dirpath, f)
             rel = os.path.relpath(full, root)
             if _matches_ignore(rel, ignore_patterns):
+                continue
+            if skip_test_dirs and (f.startswith("test_") or f.endswith("_test.py")):
                 continue
             result[classify(full)].append(full)
     return result

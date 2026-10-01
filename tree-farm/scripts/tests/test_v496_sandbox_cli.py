@@ -8,9 +8,13 @@
 """
 import io
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+
+# 自包含：允许从仓库根目录直接运行（treefarm 包在 scripts/ 下）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from treefarm.cli import _dispatch_sandbox
 
