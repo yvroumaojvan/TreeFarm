@@ -1,0 +1,55 @@
+{
+  "_说明": "Innovation Benchmark 数据集 v1（科研分支 research-v1.0，GPT 路线图要求）",
+  "_分类": {
+    "A": "已知问题（有明确答案，测 AI 能不能找到已知解）",
+    "B": "已知优秀方案（baseline 明确，测 AI 能不能超越）",
+    "C": "开放问题（无唯一答案，测 AI 能不能产出不同方案）",
+    "D": "历史失败方案（记失败原因，测 AI 能不能避免重复踩坑）",
+    "E": "真正创新任务（定义 baseline + 指标，测完整实验闭环）"
+  },
+  "benchmarks": [
+    {
+      "id": "B-001", "cat": "B",
+      "seed": "如何让列表去重保持顺序更快",
+      "baseline": "O(n^2) 朴素去重（list in 判断）",
+      "baseline_code": "def dedup(a):\n    r = []\n    for x in a:\n        if x not in r: r.append(x)\n    return r\n",
+      "measure": "time", "note": "已知解：seen=set() O(n)；更优：dict.fromkeys 保序"
+    },
+    {
+      "id": "B-002", "cat": "B",
+      "seed": "如何快速统计字符串出现次数",
+      "baseline": "collections.Counter",
+      "baseline_code": "from collections import Counter\ndef freq(a): return Counter(a)\n",
+      "measure": "score", "note": "baseline 已优；测试候选能否等价更快"
+    },
+    {
+      "id": "A-001", "cat": "A",
+      "seed": "一段代码里找出未使用变量",
+      "baseline": "AST 遍历",
+      "baseline_code": "def unused_vars(code):\n    import ast\n    names, used = set(), set()\n    t = ast.parse(code)\n    for n in ast.walk(t):\n        if isinstance(n, ast.Name):\n            (used if isinstance(n.ctx, ast.Load) else names).add(n.id)\n    return names - used\n",
+      "measure": "score", "note": "已知答案可判定（AI 需产出等价或更全的实现）"
+    },
+    {
+      "id": "C-001", "cat": "C",
+      "seed": "如何设计一个零依赖的模糊匹配算法",
+      "baseline": "trigram Jaccard",
+      "baseline_code": "def sim_trigram(a, b):\n    def tri(s): return {s[i:i+3] for i in range(len(s)-2)}\n    x, y = tri(a), tri(b)\n    return len(x & y) / max(len(x | y), 1)\n",
+      "measure": "score", "note": "开放：候选可以是编辑距离/余弦/变长 n-gram 等任意方案，要求自证更优"
+    },
+    {
+      "id": "D-001", "cat": "D",
+      "seed": "直接用递归实现树深度计算（大数失败）",
+      "baseline": "递归（深度>1000 栈溢出）",
+      "baseline_code": "def tree_depth(root):\n    if root is None: return 0\n    return 1 + max(tree_depth(root.left), tree_depth(root.right))\n",
+      "failure_reason": "递归无深度上限，深树触发 RecursionError——已知坑：候选若复用递归必须加迭代兜底",
+      "measure": "time"
+    },
+    {
+      "id": "E-001", "cat": "E",
+      "seed": "如何让冒泡排序在近有序数组上更快",
+      "baseline": "冒泡排序",
+      "baseline_code": "def bubble(a):\n    a = list(a)\n    for i in range(len(a)-1):\n        for j in range(len(a)-1-i):\n            if a[j] > a[j+1]: a[j], a[j+1] = a[j+1], a[j]\n    return a\n",
+      "measure": "time", "note": "创新任务：候选需在近有序输入上显著快于冒泡（如提前终止/插入式），换输入重复验证"
+    }
+  ]
+}

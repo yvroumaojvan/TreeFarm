@@ -6,6 +6,7 @@ L1 安全等级：用子进程 + ulimit 资源限制 + 超时杀死 + 内存监�
 全部纯标准库实现，零依赖，兼容 Linux/macOS/Termux。
 """
 import os
+import re
 import sys
 import subprocess
 import shutil
@@ -30,6 +31,8 @@ _NETWORK_MODULES = {
 _UNSAFE_IMPORT_MODULES = {
     "ctypes", "pickle", "cPickle", "marshal", "shelve", "dbm", "anydbm",
     "code", "codeop", "pty", "resource", "fcntl", "mmap",
+    # r39：importlib.import_module('os') 逃逸（GPT 实测攻击面，与 restricted 对齐）
+    "importlib",
 }
 _DANGEROUS_OS_CALLS = {
     "system", "popen", "spawnl", "spawnle", "spawnlp", "spawnlpe",
@@ -128,6 +131,13 @@ def _static_check_python(code: str, allow_file_io: bool = False) -> Tuple[bool, 
     for pat in ("__import__(", "getattr(__builtins__", "().__class__", ".__subclasses__()"):
         if pat in code:
             return False, f"检测到疑似沙箱逃逸模式: {pat}"
+    # 5) format 字符串逃逸（与 restricted r38 对齐）：
+    #    '{0.__class__}'.format(...) —— 属性访问藏在字符串内，AST 看不到
+    if ".format(" in code and re.search(
+        r"\{\s*[^{}]*__(?:class|globals|bases|mro|subclasses|import|dict|code|func|self|closure)__",
+        code,
+    ):
+        return False, "禁止 format 字符串逃逸（__xxx__ 属性访问）"
     return True, ""
 
 

@@ -155,6 +155,19 @@ if (cmd === 'idea') {
   scoredH.sort(function (a, b) { return s.nodes[b].score.total - s.nodes[a].score.total; });
   var bestH = s.nodes[scoredH[0]];
   var h = loadHarvest();
+  // r40：防重复入库（GPT 实测：连续 harvest 两次，同内容果实 1→2）。
+  // 用 seed|form|idea 拼接键的 jaccard 相似度判定，>0.9 视为重复。
+  var newKey = s.trunk + '|' + bestH.content.form + '|' + bestH.content.idea;
+  var dupIdx = -1;
+  for (var di = 0; di < h.length; di++) {
+    var key = h[di].seed + '|' + h[di].form + '|' + h[di].idea;
+    if (jaccard(newKey, key) > 0.9) { dupIdx = di; break; }
+  }
+  if (dupIdx >= 0) {
+    console.log('🚫 重复果实已存在（与库中第 ' + (dupIdx + 1) + ' 颗几乎相同），不重复入库');
+    console.log('  已有：[' + h[dupIdx].form + '] ' + h[dupIdx].idea);
+    process.exit(0);
+  }
   h.push({ seed: s.trunk, form: bestH.content.form, idea: bestH.content.idea,
            why: bestH.content.why, score: bestH.score.total, time: new Date().toISOString() });
   saveHarvest(h);
