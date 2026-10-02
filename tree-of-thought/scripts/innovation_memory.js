@@ -82,6 +82,10 @@ function cmdSave(raw) {
     // v0.8（GPT 审第八份）：ms_all 原始测量数据传给评分器——证据验证器
     // 必须亲眼看到每输入 ≥3 次合法数字才认重复（否则 repeats 声明可被伪造）
     ms_all: Array.isArray(ev.ms_all) ? ev.ms_all : undefined,
+    // v0.9（GPT 审第九份）：独立条件数必须由数据自证（[1,1]→1 不能冒充跨条件）；
+    // baseline 原始数据也进评分器——证据不完整（缺 baseline_ms_all）不能 L4
+    distinct_inputs: Number(ev.distinct_inputs) || 0,
+    baseline_ms_all: Array.isArray(ev.baseline_ms_all) ? ev.baseline_ms_all : undefined,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),
@@ -100,6 +104,11 @@ function cmdSave(raw) {
     // v0.7：重复实验证据全量保存（科研透明：不把原始测量压扁成中位数就丢了证据链）
     repeats: Number(ev.repeats) || 0,
     ms_all: Array.isArray(ev.ms_all) ? ev.ms_all : undefined,
+    // v0.9：baseline 原始证据 + 独立条件数（审计可复核 baseline 自身没偶然变慢）
+    baseline_ms_all: Array.isArray(ev.baseline_ms_all) ? ev.baseline_ms_all : undefined,
+    baseline_ms: Array.isArray(ev.baseline_ms) ? ev.baseline_ms : undefined,
+    candidate_mean: Number(ev.candidate_mean) || undefined,
+    distinct_inputs: Number(ev.distinct_inputs) || 0,
     innovation: scoreResult.error ? { error: scoreResult.error } : scoreResult,
   };
   const m = loadMem();

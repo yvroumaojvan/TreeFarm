@@ -125,14 +125,34 @@ function scoreRobustness(e) {
  */
 function validateRepeatsEvidence(e) {
   const repeats = Number(e.repeats);
-  if (!(repeats >= 3)) return false;
+  // v0.9：整数锁——repeats=3.5 或非数字直接拒绝（3.5 次实验没有科研意义）
+  if (!(Number.isInteger(repeats) && repeats >= 3)) return false;
   const all = Array.isArray(e.ms_all) ? e.ms_all : [];
   if (!all.length) return false;
-  const need = Math.max(1, Number(e.inputs) || (Array.isArray(e.results) ? e.results.length : 1));
+  const need = Math.max(1, Number(e.distinct_inputs) || Number(e.inputs) || (Array.isArray(e.results) ? e.results.length : 1));
   if (all.length < need) return false;
   for (let i = 0; i < need; i++) {
     const g = all[i];
     if (!Array.isArray(g) || g.length < repeats) return false;
+    for (const v of g) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * v0.9 baseline 证据验证器（GPT 审第九份）：审计实验时不能只信候选数据——
+ * baseline 自身也可能偶然变慢/变快，必须也有完整原始测量数据可复核。
+ */
+function validateBaselineEvidence(e) {
+  const all = Array.isArray(e.baseline_ms_all) ? e.baseline_ms_all : [];
+  if (!all.length) return false;
+  const need = Math.max(1, Number(e.distinct_inputs) || Number(e.inputs) || (Array.isArray(e.results) ? e.results.length : 1));
+  if (all.length < need) return false;
+  for (let i = 0; i < need; i++) {
+    const g = all[i];
+    if (!Array.isArray(g) || !g.length) return false;
     for (const v of g) {
       if (typeof v !== 'number' || !Number.isFinite(v)) return false;
     }
@@ -202,8 +222,12 @@ function scoreInnovation(evidence) {
   const successful = evidence.improved === true;
   // v0.8（GPT 审第八份）：证据完整性——L4 必须是「跨条件 × 真实重复 × 数据自证」，
   // 评分器不信任任何声明：真实跑过(ran) + ms_all 每输入 ≥3 次合法测量 + 多输入结果，缺一不能 L4。
+  // v0.9（GPT 审第九份）：独立条件数必须由数据自证（distinct_inputs≥2，[1,1] 算 1 个条件）
+  // + baseline 原始证据必须完整（审计可复核 baseline 自身没偶然变慢）。
   const evidenceComplete = evidence.ran === true &&
                            validateRepeatsEvidence(evidence) &&
+                           validateBaselineEvidence(evidence) &&
+                           Number(evidence.distinct_inputs) >= 2 &&
                            Array.isArray(evidence.results) && evidence.results.length >= 2;
   if (total >= 85) {
     // L5 硬门槛：可复现的新知识必须经过外部独立验证（GPT：其他人也能得到类似结论）

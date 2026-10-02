@@ -57,6 +57,19 @@ function resultsEqual(a, b) {
 }
 
 /**
+ * v0.9 条件唯一性（GPT 审第九份）：`inputs = [1, 1]` 只是同一条件 ×2，不是两个不同条件。
+ * 用键序无关比较器去重，返回真实独立条件数——评分器只认这个自证数值，不认 inputs 计数。
+ */
+function countDistinctCondition(inputs) {
+  const keys = new Set();
+  for (const inp of inputs) {
+    const args = (inp && typeof inp === 'object' && 'args' in inp) ? inp.args : inp;
+    keys.add(JSON.stringify(normalizeResult(args)));
+  }
+  return keys.size;
+}
+
+/**
  * 多输入 workload 实验（GPT 审第五/六份）：换输入必须是真的——每组输入都喂给
  * baseline 和候选（完全一样的输入），输出必须一致，指标=每输入耗时中位数。
  * variant_verified 只有真实跑完 ≥2 组输入且全部公平比较时才算真。
@@ -148,6 +161,11 @@ function runWorkloadExperiment(s, repeat, memFile) {
 
   // 4) 存记忆（variant_verified = 真实跑完 ≥2 组输入且全部一致；improved = 真实超越 baseline）
   console.log('[4/4] 存入创新记忆库……');
+  // v0.9：独立条件数必须由数据自证（[1,1] 算 1 个条件，不能冒充跨条件）
+  const distinct = countDistinctCondition(inputs);
+  if (distinct < n) {
+    console.log('   ⚠️ 检测到重复条件：' + n + ' 个输入只有 ' + distinct + ' 个独立条件（跨条件证据按 ' + distinct + ' 算）');
+  }
   const memArgs = ['save', JSON.stringify({
     seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
     code: true, ran: true,
@@ -158,9 +176,15 @@ function runWorkloadExperiment(s, repeat, memFile) {
     repeated_same_input: false,
     variant_verified: n >= 2 && allRan && consistent,
     inputs: n, seeds: 1,
+    // v0.9：真实独立条件数（[1,1]→1，[1,2]→2）——评分器只认这个
+    distinct_inputs: distinct,
     repeats: repeat, // v0.6：每输入重复测量次数（输入维度 × 重复维度分开）
     // v0.7：原始重复测量全量保存（每输入 ms_all），不压扁证据链（GPT 审第七份）
     ms_all: details.map((d) => d.cMsAll),
+    // v0.9（GPT 审第九份）：baseline 原始证据全量入库——审计时能复核 baseline 自身没偶然变慢
+    baseline_ms_all: details.map((d) => d.bMsAll),
+    baseline_ms: details.map((d) => d.bMs),
+    candidate_mean: cAvg,
     novelty_check: s.novelty_check || '',
     improved: better, // v0.6：L4 与「成功」绑定——未超越 baseline 不得进 L4
     failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + cAvg + ' vs baseline ' + bAvg + '）'),
@@ -168,7 +192,7 @@ function runWorkloadExperiment(s, repeat, memFile) {
   })];
   if (memFile) memArgs.push('--file', memFile);
   try { console.log(runMem(...memArgs)); } catch (e) { console.error('⚠️ 记忆存档失败（不影响实验结论）：' + e.message); }
-  console.log('\n🎉 实验闭环完成——多输入公平实验（' + n + ' 组）已执行并存入记忆');
+  console.log('\n🎉 实验闭环完成——多输入公平实验（' + n + ' 组 / ' + distinct + ' 独立条件）已执行并存入记忆');
 }
 
 function main() {
@@ -282,7 +306,11 @@ function main() {
     seeds: s.seeds !== undefined ? s.seeds : 1,
     // v0.8（GPT 审第八份）：统一证据模型——老路径也输出 ms_all（1 组输入 × N 次测量）。
     // 无跨输入 → 证据完整性不满足 → 不能 L4（与 workload 路径同一套判定）
+    distinct_inputs: 1, // v0.9：老路径 1 组输入 = 1 个独立条件
     ms_all: [candArr],
+    baseline_ms_all: [baseArr], // v0.9：baseline 原始证据也全量入库
+    baseline_ms: [baseAvg],
+    candidate_mean: Math.round(candAvg * 100) / 100,
     novelty_check: s.novelty_check || '',
     improved: better, // v0.6：L4 与「成功」绑定
     failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + Math.round(candAvg * 100) / 100 + ' vs baseline ' + Math.round(baseAvg * 100) / 100 + '）'),

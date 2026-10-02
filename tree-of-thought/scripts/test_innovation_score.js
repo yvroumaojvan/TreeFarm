@@ -47,8 +47,11 @@ t('L4 可重复创新', () => {
     results: [68.2, 66.9, 67.4, 67.1, 66.8],
     baseline: 80.1,
     inputs: 3, seeds: 2, variant_verified: true, repeats: 5,
+    distinct_inputs: 3, // v0.9：独立条件数必须由数据自证
     // v0.8：L4 需要证据完整性——ms_all 每输入 ≥3 次合法测量
     ms_all: [[68.2, 66.9, 67.4, 67.1, 66.8], [68.1, 67.0, 67.3, 67.2, 66.9], [68.0, 66.8, 67.5, 67.1, 67.0]],
+    // v0.9：baseline 原始证据也必须完整（审计可复核）
+    baseline_ms_all: [[80.0, 80.2, 79.8, 80.1, 79.9], [79.9, 80.1, 80.0, 80.2, 79.8], [80.1, 79.9, 80.0, 80.1, 80.0]],
     novelty_check: '检索未见同构方案，无先例，与已有 LSH 不是重复',
     improved: true,   // v0.6：L4 必须真实优于 baseline
   });
@@ -110,8 +113,9 @@ t('重复次数进评分（GPT审7：证据链不压扁）', () => {
     code: true, ran: true,
     results: [0.02, 0.03, 0.025], baseline: 0.04,
     inputs: 3, variant_verified: true, improved: true,
-    repeats: 5,
+    repeats: 5, distinct_inputs: 3,
     ms_all: [[0.02, 0.021, 0.019, 0.02, 0.022], [0.03, 0.031, 0.029, 0.03, 0.032], [0.025, 0.026, 0.024, 0.025, 0.027]],
+    baseline_ms_all: [[0.04, 0.041, 0.039, 0.04, 0.042], [0.04, 0.04, 0.041, 0.039, 0.04], [0.041, 0.039, 0.04, 0.04, 0.04]],
     novelty_check: '检索未见同构方案，无先例',
   };
   const r1 = scoreInnovation({ ...base, repeats: 1 });

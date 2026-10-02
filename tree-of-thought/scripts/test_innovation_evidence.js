@@ -18,8 +18,9 @@ const good = {
   results: [0.02, 0.021, 0.019],
   baseline: 0.05,
   inputs: 3, variant_verified: true, improved: true,
-  repeats: 5,
+  repeats: 5, distinct_inputs: 3, // v0.9：独立条件数由数据自证
   ms_all: [[0.02, 0.021, 0.019, 0.02, 0.022], [0.03, 0.031, 0.029, 0.03, 0.032], [0.025, 0.026, 0.024, 0.025, 0.027]],
+  baseline_ms_all: [[0.05, 0.051, 0.049, 0.05, 0.052], [0.05, 0.05, 0.051, 0.049, 0.05], [0.051, 0.049, 0.05, 0.05, 0.05]],
   novelty_check: '检索未见同构方案，无先例，与已有 LSH 不是重复',
 };
 
@@ -84,4 +85,33 @@ t('恶意：实验失败（ran=false）却改写结果字段 → 不能 L4', () 
   assert.strictEqual(r.level, 'L3');
 });
 
-console.log(`\n${passed}/11 恶意反例全拒`);
+// v0.9（GPT 审第九份）：条件唯一性 + 整数锁 + baseline 原始证据
+t('恶意：[1,1] 两个相同输入 → 只算 1 个独立条件 → 不能 L4', () => {
+  const r = scoreInnovation({ ...good, distinct_inputs: 1 });
+  assert.strictEqual(r.level, 'L3');
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+t('恶意：[1,1,1] 三个相同输入 → 仍 1 个独立条件 → 不能 L4', () => {
+  const r = scoreInnovation({ ...good, distinct_inputs: 1, results: [0.02, 0.021, 0.019] });
+  assert.strictEqual(r.level, 'L3');
+});
+t('正常：[1,2] 两个不同条件 + 完整重复 → 可 L4', () => {
+  const r = scoreInnovation({
+    ...good,
+    distinct_inputs: 2, results: [0.02, 0.021],
+    ms_all: [[0.02, 0.021, 0.019, 0.02, 0.022], [0.03, 0.031, 0.029, 0.03, 0.032]],
+    baseline_ms_all: [[0.05, 0.051, 0.049, 0.05, 0.052], [0.05, 0.05, 0.051, 0.049, 0.05]],
+  });
+  assert.strictEqual(r.level, 'L4');
+});
+t('恶意：repeats=3.5 非整数 → 拒（3.5 次实验无科研意义）', () => {
+  const r = scoreInnovation({ ...good, repeats: 3.5 });
+  assert.strictEqual(r.level, 'L3');
+});
+t('恶意：baseline 原始数据缺失 → 证据不完整 → 不能 L4', () => {
+  const r = scoreInnovation({ ...good, baseline_ms_all: undefined });
+  assert.strictEqual(r.level, 'L3');
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+console.log(`\n${passed}/16 恶意反例全拒`);
