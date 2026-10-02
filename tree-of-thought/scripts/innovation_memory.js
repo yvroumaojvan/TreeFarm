@@ -86,6 +86,8 @@ function cmdSave(raw) {
     // baseline 原始数据也进评分器——证据不完整（缺 baseline_ms_all）不能 L4
     distinct_inputs: Number(ev.distinct_inputs) || 0,
     baseline_ms_all: Array.isArray(ev.baseline_ms_all) ? ev.baseline_ms_all : undefined,
+    // v0.9.1：condition_keys 原始条件给评分器——它自己数去重个数（不信 distinct_inputs 声明）
+    condition_keys: Array.isArray(ev.condition_keys) ? ev.condition_keys : undefined,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),
@@ -109,6 +111,8 @@ function cmdSave(raw) {
     baseline_ms: Array.isArray(ev.baseline_ms) ? ev.baseline_ms : undefined,
     candidate_mean: Number(ev.candidate_mean) || undefined,
     distinct_inputs: Number(ev.distinct_inputs) || 0,
+    // v0.9.1：condition_keys 入库（评分器自己去重，防 distinct_inputs 伪造）
+    condition_keys: Array.isArray(ev.condition_keys) ? ev.condition_keys : undefined,
     innovation: scoreResult.error ? { error: scoreResult.error } : scoreResult,
   };
   const m = loadMem();

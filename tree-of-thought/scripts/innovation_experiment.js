@@ -178,6 +178,11 @@ function runWorkloadExperiment(s, repeat, memFile) {
     inputs: n, seeds: 1,
     // v0.9：真实独立条件数（[1,1]→1，[1,2]→2）——评分器只认这个
     distinct_inputs: distinct,
+    // v0.9.1：规范化的每个独立条件原样入库——评分器自己数去重个数（不信数字声明）
+    condition_keys: inputs.map((inp) => {
+      const args = (inp && typeof inp === 'object' && 'args' in inp) ? inp.args : inp;
+      return JSON.parse(JSON.stringify(normalizeResult(args)));
+    }),
     repeats: repeat, // v0.6：每输入重复测量次数（输入维度 × 重复维度分开）
     // v0.7：原始重复测量全量保存（每输入 ms_all），不压扁证据链（GPT 审第七份）
     ms_all: details.map((d) => d.cMsAll),
@@ -200,7 +205,15 @@ function main() {
   let schemeRaw = null, repeat = 1, memFile = null;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--scheme') schemeRaw = args[++i];
-    else if (args[i] === '--repeat') repeat = Math.max(1, parseInt(args[++i], 10) || 1);
+    else if (args[i] === '--repeat') {
+      const raw = args[++i];
+      // v0.9.1：--repeat 必须正整数（3.5/abc/0 都是参数错误 → exit 2，不静默取整）
+      if (!/^\d+$/.test(raw) || parseInt(raw, 10) < 1) {
+        console.error('❌ --repeat 必须是正整数（收到：' + raw + '）——3.5 次/0 次实验没有科研意义');
+        process.exit(2);
+      }
+      repeat = parseInt(raw, 10);
+    }
     else if (args[i] === '--memory') memFile = args[++i];
   }
   if (!schemeRaw) {

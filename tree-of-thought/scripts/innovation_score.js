@@ -144,20 +144,50 @@ function validateRepeatsEvidence(e) {
 /**
  * v0.9 baseline 证据验证器（GPT 审第九份）：审计实验时不能只信候选数据——
  * baseline 自身也可能偶然变慢/变快，必须也有完整原始测量数据可复核。
+ * v0.9.1（GPT 审第九份补充）：baseline 不能"少跑"——每组 baseline_ms_all 长度
+ * 必须 >= repeats（此前只查存在+至少1个数字，baseline [[10],[10]]+repeat=5 也能 L4）。
  */
 function validateBaselineEvidence(e) {
   const all = Array.isArray(e.baseline_ms_all) ? e.baseline_ms_all : [];
   if (!all.length) return false;
+  const repeats = Number(e.repeats);
   const need = Math.max(1, Number(e.distinct_inputs) || Number(e.inputs) || (Array.isArray(e.results) ? e.results.length : 1));
   if (all.length < need) return false;
   for (let i = 0; i < need; i++) {
     const g = all[i];
     if (!Array.isArray(g) || !g.length) return false;
+    // v0.9.1：baseline 与候选同标准（>= repeats 次合法测量）
+    if (Number.isInteger(repeats) && g.length < repeats) return false;
     for (const v of g) {
       if (typeof v !== 'number' || !Number.isFinite(v)) return false;
     }
   }
   return true;
+}
+
+/**
+ * v0.9.1 条件真自证（GPT 审第九份补充）：评分器不再只信上游报的 distinct_inputs 数字——
+ * 必须亲眼看到 condition_keys（规范化后的每个独立输入），自己数有几个不同条件。
+ * 攻击者构造 distinct_inputs: 2 但实际条件只有 1 个（[1,1]）→ 评分器自算 = 1 → 拒。
+ */
+function canonKey(v) {
+  if (Array.isArray(v)) return v.map(canonKey);
+  if (v !== null && typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = canonKey(v[k]);
+    return o;
+  }
+  return v;
+}
+function distinctConditionCount(e) {
+  const keys = Array.isArray(e.condition_keys) ? e.condition_keys : [];
+  if (keys.length) {
+    const set = new Set();
+    for (const k of keys) set.add(JSON.stringify(canonKey(k)));
+    return set.size;
+  }
+  // 老数据无 condition_keys 时退回 distinct_inputs（兼容旧记忆）
+  return Number(e.distinct_inputs) || 0;
 }
 
 /** ⑥ 新知识证据（15）：排除已知/偶然/误判 + 外部验证 */
@@ -222,12 +252,12 @@ function scoreInnovation(evidence) {
   const successful = evidence.improved === true;
   // v0.8（GPT 审第八份）：证据完整性——L4 必须是「跨条件 × 真实重复 × 数据自证」，
   // 评分器不信任任何声明：真实跑过(ran) + ms_all 每输入 ≥3 次合法测量 + 多输入结果，缺一不能 L4。
-  // v0.9（GPT 审第九份）：独立条件数必须由数据自证（distinct_inputs≥2，[1,1] 算 1 个条件）
-  // + baseline 原始证据必须完整（审计可复核 baseline 自身没偶然变慢）。
+  // v0.9：独立条件数必须由数据自证 + baseline 原始证据完整。
+  // v0.9.1：条件数用 condition_keys 自己数（不信 distinct_inputs 声明）。
   const evidenceComplete = evidence.ran === true &&
                            validateRepeatsEvidence(evidence) &&
                            validateBaselineEvidence(evidence) &&
-                           Number(evidence.distinct_inputs) >= 2 &&
+                           distinctConditionCount(evidence) >= 2 &&
                            Array.isArray(evidence.results) && evidence.results.length >= 2;
   if (total >= 85) {
     // L5 硬门槛：可复现的新知识必须经过外部独立验证（GPT：其他人也能得到类似结论）

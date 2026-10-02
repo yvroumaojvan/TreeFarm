@@ -101,7 +101,15 @@ function main() {
     if (args[i] === '--candidate-code') opts.candidateCode = args[++i].replace(/\\n/g, '\n');
     else if (args[i] === '--func') opts.func = args[++i];
     else if (args[i] === '--test-cases') opts.testCases = JSON.parse(args[++i]);
-    else if (args[i] === '--repeat') opts.repeat = Math.max(1, parseInt(args[++i], 10) || 1);
+    else if (args[i] === '--repeat') {
+      const raw = args[++i];
+      // v0.9.1：--repeat 必须正整数（3.5/abc/0 → 参数错误 exit 2，不静默取整）
+      if (!/^\d+$/.test(raw) || parseInt(raw, 10) < 1) {
+        console.error('❌ --repeat 必须是正整数（收到：' + raw + '）——3.5 次/0 次实验没有科研意义');
+        process.exit(2);
+      }
+      opts.repeat = parseInt(raw, 10);
+    }
     else if (args[i] === '--memory') opts.memory = args[++i];
     else if (args[i] === '--measure') opts.measure = args[++i];
     else if (args[i] === '--idea') opts.idea = args[++i];

@@ -114,4 +114,19 @@ t('恶意：baseline 原始数据缺失 → 证据不完整 → 不能 L4', () =
   assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
 });
 
-console.log(`\n${passed}/16 恶意反例全拒`);
+// v0.9.1（GPT 审第九份补充）：baseline 不能少跑 + condition_keys 真自证
+t('恶意：baseline 每组只有 1 次测量但 repeat=5 → 拒（baseline 不能少跑）', () => {
+  const r = scoreInnovation({ ...good, baseline_ms_all: [[0.05], [0.05], [0.05]] });
+  assert.strictEqual(r.level, 'L3');
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+t('恶意：distinct_inputs=2 伪造但 condition_keys 只有 1 个条件 → 拒（评分器自算）', () => {
+  const r = scoreInnovation({ ...good, distinct_inputs: 2, condition_keys: [[1], [1]] });
+  assert.strictEqual(r.level, 'L3');
+});
+t('正常：condition_keys 两个不同条件（[1],[2]）→ 可 L4', () => {
+  const r = scoreInnovation({ ...good, condition_keys: [[1], [2]] });
+  assert.strictEqual(r.level, 'L4');
+});
+
+console.log(`\n${passed}/19 恶意反例全拒`);
