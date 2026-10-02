@@ -79,6 +79,9 @@ function cmdSave(raw) {
     // GPT 审（第七份）：重复实验证据链——repeats=每输入重复测量次数，
     // 评分器据此区分「3 输入×1 次」和「3 输入×5 次」（此前 repeat 执行了但没进证据）
     repeats: Number(ev.repeats) || 0,
+    // v0.8（GPT 审第八份）：ms_all 原始测量数据传给评分器——证据验证器
+    // 必须亲眼看到每输入 ≥3 次合法数字才认重复（否则 repeats 声明可被伪造）
+    ms_all: Array.isArray(ev.ms_all) ? ev.ms_all : undefined,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),

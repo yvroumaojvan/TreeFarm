@@ -280,6 +280,9 @@ function main() {
     variant_verified: Array.isArray(s.variant_results) && s.variant_results.length >= 2,
     inputs: Array.isArray(s.inputs) ? s.inputs.length : 1,
     seeds: s.seeds !== undefined ? s.seeds : 1,
+    // v0.8（GPT 审第八份）：统一证据模型——老路径也输出 ms_all（1 组输入 × N 次测量）。
+    // 无跨输入 → 证据完整性不满足 → 不能 L4（与 workload 路径同一套判定）
+    ms_all: [candArr],
     novelty_check: s.novelty_check || '',
     improved: better, // v0.6：L4 与「成功」绑定
     failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + Math.round(candAvg * 100) / 100 + ' vs baseline ' + Math.round(baseAvg * 100) / 100 + '）'),

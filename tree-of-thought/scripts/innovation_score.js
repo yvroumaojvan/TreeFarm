@@ -108,10 +108,36 @@ function scoreRobustness(e) {
   // GPT 审修复：换输入/换种子分必须由真实多变体实验证明（variant_verified），
   // 纯数字声明（inputs/seeds 计数）不再给分——否则"同代码跑三次"就能冒充可重复。
   if (e.variant_verified === true) score += 5;
-  // v0.7（GPT 审第七份）：重复实验证据链——每输入 ≥3 次真实重复测量才给重复分。
-  // 此前 repeat 执行了但没进评分，repeat=1/2/5 分数全一样（证据被压扁成中位数）。
-  if (Number(e.repeats) >= 3) score += 5;
+  // v0.7 起重复测量进评分；v0.8（GPT 审第八份）改为必须通过证据验证——
+  // 评分器不再直接相信 repeats 声明，伪造 repeats（ms_all 缺失/不足/含 NaN）不加分。
+  if (validateRepeatsEvidence(e)) score += 5;
   return clampTo(score, 20);
+}
+
+/**
+ * v0.8 证据验证器（GPT 审第八份：证据完整性）：
+ * 评分器不直接相信 `repeats: 5` 这种声明，必须自证：
+ *   - repeats >= 3
+ *   - 每个 input 都存在 ms_all（每输入一组原始测量）
+ *   - ms_all 每组长度 >= repeats
+ *   - 每项都是合法数字（NaN/字符串 "NaN"/Infinity 全拒）
+ * 不满足 → 重复性证据无效：不能获得重复实验加分，不能凭此进入 L4。
+ */
+function validateRepeatsEvidence(e) {
+  const repeats = Number(e.repeats);
+  if (!(repeats >= 3)) return false;
+  const all = Array.isArray(e.ms_all) ? e.ms_all : [];
+  if (!all.length) return false;
+  const need = Math.max(1, Number(e.inputs) || (Array.isArray(e.results) ? e.results.length : 1));
+  if (all.length < need) return false;
+  for (let i = 0; i < need; i++) {
+    const g = all[i];
+    if (!Array.isArray(g) || g.length < repeats) return false;
+    for (const v of g) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) return false;
+    }
+  }
+  return true;
 }
 
 /** ⑥ 新知识证据（15）：排除已知/偶然/误判 + 外部验证 */
@@ -174,13 +200,18 @@ function scoreInnovation(evidence) {
   // GPT 审（第六份）修复：L4 还要真实优于 baseline——「可重复」和「成功」必须绑定，
   // 否则一个没超过 baseline 的候选（improved=false）也能靠跨输入证据混进 L4。
   const successful = evidence.improved === true;
+  // v0.8（GPT 审第八份）：证据完整性——L4 必须是「跨条件 × 真实重复 × 数据自证」，
+  // 评分器不信任任何声明：真实跑过(ran) + ms_all 每输入 ≥3 次合法测量 + 多输入结果，缺一不能 L4。
+  const evidenceComplete = evidence.ran === true &&
+                           validateRepeatsEvidence(evidence) &&
+                           Array.isArray(evidence.results) && evidence.results.length >= 2;
   if (total >= 85) {
     // L5 硬门槛：可复现的新知识必须经过外部独立验证（GPT：其他人也能得到类似结论）
-    if (evidence.external_verified === true && successful) level = 'L5';
-    else if (successful) level = 'L4'; // 高分但缺外部验证 → 按 L4 计（硬门槛机制）
-    else level = 'L3'; // 高分但未优于 baseline → 不算可复现新知识
+    if (evidence.external_verified === true && successful && evidenceComplete) level = 'L5';
+    else if (successful && evidenceComplete) level = 'L4'; // 高分但缺外部验证 → 按 L4 计
+    else level = 'L3'; // 高分但未超越/证据不完整 → 不算可复现新知识
   } else if (total >= 65) {
-    level = (reproducible && successful) ? 'L4' : 'L3'; // 缺跨条件证据或未超越 → 降 L3
+    level = (reproducible && successful && evidenceComplete) ? 'L4' : 'L3'; // 缺任一 → 降 L3
   } else if (total >= 40) level = 'L3';
   else if (total >= 20) level = 'L2';
   else level = 'L1';
@@ -191,8 +222,14 @@ function scoreInnovation(evidence) {
   if (total >= 85 && !successful) {
     notes.push('总分达到 L5 区间但未优于 baseline（improved=false），按硬门槛降为 L3');
   }
-  if (total >= 65 && !(reproducible && successful)) {
-    const why = !reproducible ? '缺少跨条件可重复证据（reproduced/variant_verified）' : '未优于 baseline（improved=false）';
+  if (total >= 85 && !evidenceComplete) {
+    notes.push('总分达到 L5 区间但重复实验证据不完整（需每输入 ms_all ≥3 次合法测量 + 多输入），按硬门槛降为 L3');
+  }
+  if (total >= 65 && !(reproducible && successful && evidenceComplete)) {
+    let why;
+    if (!reproducible) why = '缺少跨条件可重复证据（reproduced/variant_verified）';
+    else if (!successful) why = '未优于 baseline（improved=false）';
+    else why = '重复实验证据不完整（需每输入 ms_all ≥3 次合法测量 + 多输入结果）';
     notes.push('总分达到 L4 区间但' + why + '，按硬门槛降为 L3');
   }
   return { dims, total, level, ...(notes.length ? { notes } : {}) };
