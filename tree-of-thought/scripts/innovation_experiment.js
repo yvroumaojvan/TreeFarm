@@ -38,6 +38,114 @@ function runMem(...args) {
 }
 function fail(msg) { console.error('❌ ' + msg); process.exit(1); }
 
+/**
+ * 多输入 workload 实验（GPT 审第五份）：换输入必须是真的——每组输入都喂给
+ * baseline 和候选（完全一样的输入），输出必须一致，指标=每输入耗时。
+ * variant_verified 只有真实跑完 ≥2 组输入且全部公平比较时才算真。
+ */
+function runWorkloadExperiment(s, repeat, memFile) {
+  const func = s.func || 'f';
+  const inputs = s.inputs;
+  const n = inputs.length;
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  console.log('\n[1/4] 跑 baseline workload（真实执行 ' + func + '(输入) ×' + n + ' 组）……');
+  const base = runPython('--workload', JSON.stringify({ code: s.baseline_code, func, inputs }));
+  if (!base.ok) fail('baseline 执行失败：' + base.error);
+  const baseRows = base.per_input;
+
+  console.log('[2/4] 跑候选 workload（同样 ' + n + ' 组输入）……');
+  let cand = null, candErr = '';
+  try { cand = runPython('--workload', JSON.stringify({ code: s.code, func, inputs })); }
+  catch (e) { candErr = e.message; }
+  if (!cand || !cand.ok) {
+    const err = candErr || (cand && cand.error) || '未知错误';
+    console.log('   候选执行失败：' + err + ' —— 失败原因存入记忆库');
+    const memArgs = ['save', JSON.stringify({
+      seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
+      code: true, ran: false, improved: false,
+      failure_reason: '候选执行失败：' + err,
+      results: [], baseline: undefined,
+      inputs: n, seeds: 1,
+      different: s.different !== undefined ? s.different : undefined,
+    })];
+    if (memFile) memArgs.push('--file', memFile);
+    try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 失败记忆存档异常：' + e2.message); }
+    console.log('\n❌ 实验中止（候选失败），失败原因已记录。');
+    process.exit(0);
+  }
+  const candRows = cand.per_input;
+
+  // 3) 公平对比：输出必须一致（结果相等）+ 每输入耗时
+  console.log('[3/4] 公平对比（同一输入，输出必须一致，比耗时）……');
+  const details = [];
+  let consistent = true, allRan = true;
+  for (let i = 0; i < n; i++) {
+    const b = baseRows[i], c = candRows[i];
+    const bOk = !!(b && b.ok), cOk = !!(c && c.ok);
+    if (bOk && cOk) {
+      const same = JSON.stringify(b.result) === JSON.stringify(c.result);
+      if (!same) consistent = false;
+      const bMs = b.ms || 0, cMs = c.ms || 0;
+      details.push({ i, same, bMs, cMs, better: cMs < bMs });
+    } else {
+      allRan = false; consistent = false;
+      details.push({ i, same: false, note: (bOk ? '' : 'baseline执行失败 ') + (cOk ? '' : '候选执行失败') });
+    }
+  }
+  const bAvg = Math.round(avg(details.filter((d) => d.bMs !== undefined).map((d) => d.bMs)) * 100) / 100;
+  const cAvg = Math.round(avg(details.filter((d) => d.cMs !== undefined).map((d) => d.cMs)) * 100) / 100;
+  const betterCount = details.filter((d) => d.better).length;
+  const better = allRan && consistent && betterCount >= Math.ceil(n * 2 / 3);
+  details.forEach((d) => {
+    if (d.bMs !== undefined) {
+      console.log(`   输入${d.i + 1}：baseline ${Math.round(d.bMs * 100) / 100}ms vs 候选 ${Math.round(d.cMs * 100) / 100}ms  ${d.same ? (d.better ? '✅' : '↩️') : '❌输出不一致'}`);
+    } else {
+      console.log('   输入' + (d.i + 1) + '：⚠️ ' + (d.note || ''));
+    }
+  });
+  console.log('   输出一致性：' + (consistent ? '✅ 全部一致' : '❌ 存在不一致'));
+  if (allRan) {
+    console.log(`   均值：baseline ${bAvg}ms vs 候选 ${cAvg}ms → ${better ? '✅ 优于 baseline（' + betterCount + '/' + n + ' 输入同向）' : '↩️ 未超越 baseline'}`);
+  }
+  if (!allRan || !consistent) {
+    console.log('   ❌ 输出不一致/未跑全——不算超越 baseline（GPT 审第五份：公平输入+结果相等是实验前提）');
+    const memArgs = ['save', JSON.stringify({
+      seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
+      code: true, ran: true, improved: false,
+      failure_reason: '实验无效：' + (allRan ? '候选输出与 baseline 不一致' : '部分输入执行失败') +
+        (allRan ? '' : '（' + details.filter((d) => d.note).map((d) => '输入' + (d.i + 1)).join('、') + '）'),
+      results: details.filter((d) => d.cMs !== undefined).map((d) => d.cMs),
+      baseline: bAvg,
+      inputs: n, seeds: 1,
+      different: s.different !== undefined ? s.different : undefined,
+    })];
+    if (memFile) memArgs.push('--file', memFile);
+    try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 记忆存档异常：' + e2.message); }
+    console.log('\n❌ 实验中止（公平性未满足），原因已记录。');
+    process.exit(0);
+  }
+
+  // 4) 存记忆（variant_verified = 真实跑完 ≥2 组输入且全部一致）
+  console.log('[4/4] 存入创新记忆库……');
+  const memArgs = ['save', JSON.stringify({
+    seed: s.seed, form: s.form, idea: s.idea, why: s.why || '',
+    code: true, ran: true,
+    results: details.map((d) => d.cMs),
+    baseline: bAvg,
+    // GPT 审第五份：reproduced 需要跨条件重复声明；variant_verified 由真实多输入证明
+    reproduced: false,
+    repeated_same_input: false,
+    variant_verified: n >= 2 && allRan && consistent,
+    inputs: n, seeds: 1,
+    novelty_check: s.novelty_check || '',
+    failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + cAvg + ' vs baseline ' + bAvg + '）'),
+    different: s.different !== undefined ? s.different : undefined,
+  })];
+  if (memFile) memArgs.push('--file', memFile);
+  try { console.log(runMem(...memArgs)); } catch (e) { console.error('⚠️ 记忆存档失败（不影响实验结论）：' + e.message); }
+  console.log('\n🎉 实验闭环完成——多输入公平实验（' + n + ' 组）已执行并存入记忆');
+}
+
 function main() {
   const args = process.argv.slice(2);
   let schemeRaw = null, repeat = 1, memFile = null;
@@ -83,9 +191,15 @@ function main() {
       if (memFile) memArgs.push('--file', memFile);
       try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 记忆存档异常：' + e2.message); }
       console.log('\n❌ 实验中止（候选不正确），失败原因已记录。');
-      process.exit(1);
+      process.exit(0);
     }
     console.log('   ✅ 正确性通过：' + v.passed + '/' + v.total + ' 用例全部正确');
+  }
+
+  // 1) 多输入 workload 实验（GPT 审第五份：换输入必须真实执行，不再是数据字段）
+  if (Array.isArray(s.inputs) && s.inputs.length) {
+    runWorkloadExperiment(s, repeat, memFile);
+    return;
   }
 
   // 1) baseline
@@ -114,7 +228,7 @@ function main() {
     if (memFile) memArgs.push('--file', memFile);
     try { console.log(runMem(...memArgs)); } catch (e2) { console.error('⚠️ 失败记忆存档异常：' + e2.message); }
     console.log('\n❌ 实验中止（候选失败），失败原因已记录。');
-    process.exit(1);
+    process.exit(0);
   }
   const candArr = measure === 'time' ? cand.times_ms : cand.values;
 

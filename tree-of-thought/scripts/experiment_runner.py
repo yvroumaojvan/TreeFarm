@@ -91,13 +91,83 @@ def verify_code(code: str, verify_json: str) -> dict:
             "failures": [i for i, x in enumerate(rv) if x is not True][:5]}
 
 
+def run_workload(workload_json: str) -> dict:
+    """workload 模式（GPT 审第五份：Benchmark 必须真正执行 workload）。
+    workload_json: {
+      "code": "def f(a): ...",     # 被测代码（函数定义）
+      "func": "f",                  # 被测函数名
+      "inputs": [ {"args": [...]}, ... ]   # 每组输入（真实数据）
+    }
+    对每组输入：把「定义 + 真实调用 func(*args) + 计时」拼成一段代码进沙箱执行，
+    输出 per_input = [{args, ms, result, ok}]——测的是 algorithm(input) 的真性能，
+    而不是"定义函数/解析脚本"的时间（此前 B-001 只测了解析时间）。
+    """
+    try:
+        spec = json.loads(workload_json)
+    except Exception as e:
+        return {"ok": False, "error": "workload JSON 解析失败：" + str(e)}
+    code = spec.get("code") or ""
+    func = spec.get("func") or "f"
+    inputs = spec.get("inputs") or []
+    if not inputs:
+        return {"ok": True, "per_input": [], "error": ""}
+    per_input = []
+    for i, inp in enumerate(inputs):
+        if isinstance(inp, dict) and "args" in inp:
+            args = inp["args"]
+        else:
+            args = inp if isinstance(inp, list) else [inp]
+        if not isinstance(args, list):
+            args = [args]
+        call_code = "\n".join([
+            code,
+            "import time as _t, json as _j",
+            "_a = " + json.dumps(args, ensure_ascii=False),
+            "_t0 = _t.perf_counter()",
+            "_r = " + func + "(*_a)",
+            "_dt = (_t.perf_counter() - _t0) * 1000",
+            "print('_TIME_ ' + str(_dt))",
+            "print('_RESULT_ ' + _j.dumps(_r))",
+        ])
+        runner = SandboxRunner()
+        runner.enable()
+        result = runner.run_code(call_code, language="python")
+        item = {"args": args, "ok": result.success, "ms": None, "result": None}
+        if result.success:
+            ms, res = None, None
+            for line in result.stdout.strip().splitlines():
+                if line.startswith("_TIME_ "):
+                    try:
+                        ms = round(float(line[len("_TIME_ "):]), 3)
+                    except ValueError:
+                        pass
+                elif line.startswith("_RESULT_ "):
+                    raw = line[len("_RESULT_ "):].strip()
+                    try:
+                        res = json.loads(raw)
+                    except Exception:
+                        res = raw
+            item["ms"] = ms
+            item["result"] = res
+        else:
+            item["error"] = result.error or result.stderr.strip()
+        per_input.append(item)
+    return {"ok": True, "per_input": per_input, "error": ""}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--code", required=True)
+    ap.add_argument("--code", required=False)
     ap.add_argument("--measure", choices=["time", "score"], default="time")
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--verify", default=None)
+    ap.add_argument("--workload", default=None)
     args = ap.parse_args()
+
+    if args.workload:
+        out = run_workload(args.workload)
+        print(json.dumps(out, ensure_ascii=False))
+        return 0 if out.get("ok", False) else 1
 
     if args.verify:
         out = verify_code(args.code, args.verify)

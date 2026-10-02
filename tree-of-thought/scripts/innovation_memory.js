@@ -69,6 +69,11 @@ function cmdSave(raw) {
     inputs: ev.inputs, seeds: ev.seeds,
     novelty_check: ev.novelty_check,
     external_verified: ev.external_verified === true,
+    // GPT 审（第五份）字段贯通：reproduced/variant_verified 是 L4 跨条件证据，
+    // repeated_same_input 仅作为运行稳定参考（评分器门槛已收紧，不会单独进 L4）
+    reproduced: ev.reproduced === true,
+    variant_verified: ev.variant_verified === true,
+    repeated_same_input: ev.repeated_same_input === true,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),

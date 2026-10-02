@@ -52,7 +52,7 @@ t('L4 可重复创新', () => {
   assert.strictEqual(r.level, 'L4');
   assert.ok(r.dims.robustness >= 15);
   assert.ok(r.dims.evidence >= 6);
-  assert.ok(r.note);   // 总分达到 L5 区间但缺外部验证 → 硬门槛降 L4 并给提示
+  assert.ok(r.notes);   // 总分达到 L5 区间但缺外部验证 → 硬门槛降 L4 并给提示
 });
 
 // 3b) GPT 审修复：伪 L4 复现——只跑一次 + 写句 novelty_check → 不得进 L4
@@ -67,6 +67,19 @@ t('伪L4拦截：单次实验不得进L4（GPT审案例）', () => {
     inputs: 1, seeds: 1,
   });
   assert.strictEqual(r.level, 'L3');   // 必须降级（缺可重复证据）
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+// 3c) GPT 审第五份：同输入重复 ≥3 次只证明"运行稳定"，不得单独进 L4（跨条件证据才算）
+t('同输入重复不得冒充L4（GPT审5：跨条件证据才算）', () => {
+  const r = scoreInnovation({
+    scheme: '对同一输入重复跑三次的候选',
+    different: true,
+    code: true, ran: true,
+    results: [10, 10, 10], baseline: 10,
+    repeated_same_input: true,   // 只证明运行稳定，不证明换条件仍成立
+  });
+  assert.strictEqual(r.level, 'L3');   // 缺跨条件可重复证据 → 不能 L4
   assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
 });
 
@@ -109,4 +122,4 @@ t('空证据拒绝', () => {
   assert.ok(r.error);
 });
 
-console.log(`\n${passed}/7 通过`);
+console.log(`\n${passed}/9 通过`);

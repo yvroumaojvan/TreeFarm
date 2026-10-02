@@ -30,3 +30,4 @@ build/
 dist/
 *.egg-info/
 *.zip
+tree-of-thought/scripts/innovation_memory.json

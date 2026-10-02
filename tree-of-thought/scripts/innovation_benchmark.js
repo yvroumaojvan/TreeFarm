@@ -53,26 +53,32 @@ function runOne(id, opts) {
   const repeat = opts.repeat || 1;
   console.log('🧪 Benchmark ' + id + '：' + b.seed + '（' + b.cat + '类，' + measure + '）');
 
-  // 1) baseline 基准
-  console.log('  跑 baseline 基准……');
-  const base = runPython('--code', b.baseline_code, '--measure', measure, '--repeat', String(repeat));
+  // 1) baseline 基准：真实执行 workload（测 func(输入) 的真性能，而非定义时间）
+  console.log('  跑 baseline workload（真实执行 ' + b.func + '(输入) ×' + b.inputs.length + ' 组）……');
+  const base = runPython('--workload', JSON.stringify({ code: b.baseline_code, func: b.func, inputs: b.inputs }));
   if (!base.ok) fail('baseline 执行失败：' + base.error);
-  const baseArr = measure === 'time' ? base.times_ms : base.values;
+  base.per_input.forEach((r, i) => {
+    const ok = r.ok ? '✅' : '❌';
+    const extra = r.ms !== null ? r.ms + ' ms' : (r.error || '');
+    const res = r.result !== null && r.result !== undefined ? ' → ' + JSON.stringify(r.result).slice(0, 50) : '';
+    console.log('   输入' + (i + 1) + '：' + ok + ' ' + extra + res);
+  });
+  const times = base.per_input.filter((r) => r.ms !== null).map((r) => r.ms);
+  if (!times.length) fail('baseline 所有输入都未产出耗时（无有效基准）');
   const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
-  console.log('  baseline：' + baseArr.map((x) => Math.round(x * 100) / 100).join(', ') +
-    '（均值 ' + Math.round(avg(baseArr) * 100) / 100 + '）');
+  console.log('   baseline 均值：' + Math.round(avg(times) * 100) / 100 + ' ms');
 
   // 2) 无候选 → 到此为止（基准校准）
   if (!opts.candidateCode) {
-    console.log('\n✅ baseline 基准完成（用 --candidate-code 接候选即可跑完整实验）');
+    console.log('\n✅ baseline workload 基准完成（用 --candidate-code 接候选即可跑完整实验）');
     return;
   }
 
-  // 3) 有候选 → 走完整实验闭环（正确性验证 + 指标对比 + 存记忆）
+  // 3) 有候选 → 走完整实验闭环（workload 公平比较 + 输出一致校验 + 存记忆）
   const scheme = {
     seed: b.seed, form: 'Benchmark:' + id, idea: opts.idea || ('针对 ' + id + ' 的候选方案'),
     code: opts.candidateCode, baseline_code: b.baseline_code,
-    measure, func: opts.func, test_cases: opts.testCases,
+    measure, func: b.func, inputs: b.inputs, test_cases: opts.testCases,
     different: true, novelty_check: b.note || '',
   };
   const expArgs = ['--scheme', JSON.stringify(scheme), '--repeat', String(repeat)];
@@ -90,7 +96,7 @@ function main() {
   const cmd = args[0];
   const opts = { repeat: 1 };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--candidate-code') opts.candidateCode = args[++i];
+    if (args[i] === '--candidate-code') opts.candidateCode = args[++i].replace(/\\n/g, '\n');
     else if (args[i] === '--func') opts.func = args[++i];
     else if (args[i] === '--test-cases') opts.testCases = JSON.parse(args[++i]);
     else if (args[i] === '--repeat') opts.repeat = Math.max(1, parseInt(args[++i], 10) || 1);

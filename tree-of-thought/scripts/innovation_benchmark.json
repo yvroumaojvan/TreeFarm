@@ -1,5 +1,5 @@
 {
-  "_说明": "Innovation Benchmark 数据集 v1（科研分支 research-v1.0，GPT 路线图要求）",
+  "_说明": "Innovation Benchmark 数据集 v2（科研分支 research-v1.0，GPT 审第五份驱动：Benchmark 必须真正执行 workload）",
   "_分类": {
     "A": "已知问题（有明确答案，测 AI 能不能找到已知解）",
     "B": "已知优秀方案（baseline 明确，测 AI 能不能超越）",
@@ -7,49 +7,92 @@
     "D": "历史失败方案（记失败原因，测 AI 能不能避免重复踩坑）",
     "E": "真正创新任务（定义 baseline + 指标，测完整实验闭环）"
   },
+  "_执行协议": "v2：每项带 func + inputs（真实数据）。引擎用 --workload 真正执行 func(inputs)，测的是 algorithm(input) 的性能，而非定义函数/解析时间；baseline 与候选吃完全一样的输入；输出必须一致（公平比较）；指标=每输入耗时。",
   "benchmarks": [
     {
       "id": "B-001", "cat": "B",
       "seed": "如何让列表去重保持顺序更快",
       "baseline": "O(n^2) 朴素去重（list in 判断）",
+      "func": "dedup",
       "baseline_code": "def dedup(a):\n    r = []\n    for x in a:\n        if x not in r: r.append(x)\n    return r\n",
-      "measure": "time", "note": "已知解：seen=set() O(n)；更优：dict.fromkeys 保序"
+      "measure": "time",
+      "inputs": [
+        {"args": [[3,1,3,2,7,7,5,1,4,9,9,2]]},
+        {"args": [[5,2,8,5,2,9,1,8,2,7,7,3,5,2,9,1,4,4,1,8]]},
+        {"args": [[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,5,5,7,7,9,9,11,11,13,13,15,15,1,2,3]]}
+      ],
+      "note": "已知解：seen=set() O(n)；更优：dict.fromkeys 保序。v2 起 baseline 真正执行 dedup(输入)，不再测定义时间"
     },
     {
       "id": "B-002", "cat": "B",
       "seed": "如何快速统计字符串出现次数",
       "baseline": "collections.Counter",
+      "func": "freq",
       "baseline_code": "from collections import Counter\ndef freq(a): return Counter(a)\n",
-      "measure": "score", "note": "baseline 已优；测试候选能否等价更快"
+      "measure": "time",
+      "inputs": [
+        {"args": [["apple","banana","apple","cherry","banana","apple","durian","cherry"]]},
+        {"args": [["a","b","c","a","b","a","d","c","b","b","a","c","d","a","b","c","d","a","b","a"]]},
+        {"args": [["red","green","blue","red","blue","red","green","yellow","blue","red","green","blue","green","red","yellow","blue","red","green","blue","red","green","blue","red","yellow","green","red","blue","green","red","blue"]]}
+      ],
+      "note": "baseline 已优；v2 起真执行 freq(输入)（此前 baseline 没执行 freq 也没输出指标，候选 print(1) 都能冒充更优）"
     },
     {
       "id": "A-001", "cat": "A",
       "seed": "一段代码里找出未使用变量",
       "baseline": "AST 遍历",
+      "func": "unused_vars",
       "baseline_code": "def unused_vars(code):\n    import ast\n    names, used = set(), set()\n    t = ast.parse(code)\n    for n in ast.walk(t):\n        if isinstance(n, ast.Name):\n            (used if isinstance(n.ctx, ast.Load) else names).add(n.id)\n    return names - used\n",
-      "measure": "score", "note": "已知答案可判定（AI 需产出等价或更全的实现）"
+      "measure": "time",
+      "inputs": [
+        {"args": ["x = 1\ny = x + 2\nprint(y)\n"]},
+        {"args": ["def f(a, b):\n    c = a + b\n    return c\n"]},
+        {"args": ["import os\nz = 1\nprint(z)\n"]}
+      ],
+      "note": "已知答案可判定；v2 起真执行 unused_vars(代码)，输出=未使用变量集合（baseline 与候选必须一致）"
     },
     {
       "id": "C-001", "cat": "C",
       "seed": "如何设计一个零依赖的模糊匹配算法",
       "baseline": "trigram Jaccard",
+      "func": "sim_trigram",
       "baseline_code": "def sim_trigram(a, b):\n    def tri(s): return {s[i:i+3] for i in range(len(s)-2)}\n    x, y = tri(a), tri(b)\n    return len(x & y) / max(len(x | y), 1)\n",
-      "measure": "score", "note": "开放：候选可以是编辑距离/余弦/变长 n-gram 等任意方案，要求自证更优"
+      "measure": "time",
+      "inputs": [
+        {"args": ["hello world", "hello there"]},
+        {"args": ["the quick brown fox", "the quick brown dog"]},
+        {"args": ["machine learning", "deep learning"]}
+      ],
+      "note": "开放：候选可以是编辑距离/余弦/变长 n-gram 等任意方案，要求输出与 baseline 一致（同为相似度）且自证更优"
     },
     {
       "id": "D-001", "cat": "D",
       "seed": "直接用递归实现树深度计算（大数失败）",
       "baseline": "递归（深度>1000 栈溢出）",
-      "baseline_code": "def tree_depth(root):\n    if root is None: return 0\n    return 1 + max(tree_depth(root.left), tree_depth(root.right))\n",
+      "func": "tree_depth",
+      "baseline_code": "def tree_depth(root):\n    if root is None: return 0\n    return 1 + max(tree_depth(root['left']), tree_depth(root['right']))\n",
       "failure_reason": "递归无深度上限，深树触发 RecursionError——已知坑：候选若复用递归必须加迭代兜底",
-      "measure": "time"
+      "measure": "time",
+      "inputs": [
+        {"args": [{"left": {"left": {"left": null, "right": null}, "right": null}, "right": {"left": null, "right": {"left": null, "right": null}}}]},
+        {"args": [{"left": {"left": {"left": {"left": {"left": null, "right": null}, "right": null}, "right": null}, "right": {"left": {"left": null, "right": null}, "right": null}}, "right": {"left": {"left": null, "right": {"left": null, "right": null}}, "right": null}}]},
+        {"args": [{"left": {"left": {"left": {"left": {"left": {"left": null, "right": null}, "right": null}, "right": null}, "right": null}, "right": null}, "right": null}]}
+      ],
+      "note": "v2：树改为 dict 结构（root['left']/['right']），输入为真实嵌套树；深>1000 的链会触发 RecursionError 属预期（baseline 失败=已知坑演示）"
     },
     {
       "id": "E-001", "cat": "E",
       "seed": "如何让冒泡排序在近有序数组上更快",
       "baseline": "冒泡排序",
+      "func": "bubble",
       "baseline_code": "def bubble(a):\n    a = list(a)\n    for i in range(len(a)-1):\n        for j in range(len(a)-1-i):\n            if a[j] > a[j+1]: a[j], a[j+1] = a[j+1], a[j]\n    return a\n",
-      "measure": "time", "note": "创新任务：候选需在近有序输入上显著快于冒泡（如提前终止/插入式），换输入重复验证"
+      "measure": "time",
+      "inputs": [
+        {"args": [[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,13,9,5]]},
+        {"args": [[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,25,19,7]]},
+        {"args": [[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,31,23,17,11,5]]}
+      ],
+      "note": "创新任务：候选需在近有序输入上显著快于冒泡（如提前终止/插入式），换输入重复验证；输出必须与 baseline 完全一致（排序结果）"
     }
   ]
 }
