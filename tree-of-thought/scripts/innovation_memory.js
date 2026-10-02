@@ -76,6 +76,9 @@ function cmdSave(raw) {
     repeated_same_input: ev.repeated_same_input === true,
     // GPT 审（第六份）：L4 与「成功」绑定——improved 必须真实优于 baseline
     improved: ev.improved === true,
+    // GPT 审（第七份）：重复实验证据链——repeats=每输入重复测量次数，
+    // 评分器据此区分「3 输入×1 次」和「3 输入×5 次」（此前 repeat 执行了但没进证据）
+    repeats: Number(ev.repeats) || 0,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),
@@ -91,6 +94,9 @@ function cmdSave(raw) {
     improved: ev.improved === true,
     conditions: ev.conditions !== undefined ? String(ev.conditions) : '',
     reproduced: ev.reproduced === true,
+    // v0.7：重复实验证据全量保存（科研透明：不把原始测量压扁成中位数就丢了证据链）
+    repeats: Number(ev.repeats) || 0,
+    ms_all: Array.isArray(ev.ms_all) ? ev.ms_all : undefined,
     innovation: scoreResult.error ? { error: scoreResult.error } : scoreResult,
   };
   const m = loadMem();

@@ -108,6 +108,9 @@ function scoreRobustness(e) {
   // GPT 审修复：换输入/换种子分必须由真实多变体实验证明（variant_verified），
   // 纯数字声明（inputs/seeds 计数）不再给分——否则"同代码跑三次"就能冒充可重复。
   if (e.variant_verified === true) score += 5;
+  // v0.7（GPT 审第七份）：重复实验证据链——每输入 ≥3 次真实重复测量才给重复分。
+  // 此前 repeat 执行了但没进评分，repeat=1/2/5 分数全一样（证据被压扁成中位数）。
+  if (Number(e.repeats) >= 3) score += 5;
   return clampTo(score, 20);
 }
 

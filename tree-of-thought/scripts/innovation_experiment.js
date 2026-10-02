@@ -105,7 +105,7 @@ function runWorkloadExperiment(s, repeat, memFile) {
       const same = resultsEqual(b.result, c.result);
       if (!same) consistent = false;
       const bMs = b.ms || 0, cMs = c.ms || 0;
-      details.push({ i, same, bMs, cMs, better: cMs < bMs });
+      details.push({ i, same, bMs, cMs, better: cMs < bMs, cMsAll: c.ms_all, bMsAll: b.ms_all });
     } else {
       allRan = false; consistent = false;
       details.push({ i, same: false, note: (bOk ? '' : 'baseline执行失败 ') + (cOk ? '' : '候选执行失败') });
@@ -114,7 +114,9 @@ function runWorkloadExperiment(s, repeat, memFile) {
   const bAvg = Math.round(avg(details.filter((d) => d.bMs !== undefined).map((d) => d.bMs)) * 100) / 100;
   const cAvg = Math.round(avg(details.filter((d) => d.cMs !== undefined).map((d) => d.cMs)) * 100) / 100;
   const betterCount = details.filter((d) => d.better).length;
-  const better = allRan && consistent && betterCount >= Math.ceil(n * 2 / 3);
+  // v0.7（GPT 审第七份）：成功判定统一——2/3 输入更快 且 总体均值也更小，
+  // 否则"输入3极慢但 2/3 输入快"这种边界会被误判为超越（均值语义与逐输入语义分裂）
+  const better = allRan && consistent && betterCount >= Math.ceil(n * 2 / 3) && cAvg < bAvg;
   details.forEach((d) => {
     if (d.bMs !== undefined) {
       console.log(`   输入${d.i + 1}：baseline ${Math.round(d.bMs * 100) / 100}ms vs 候选 ${Math.round(d.cMs * 100) / 100}ms  ${d.same ? (d.better ? '✅' : '↩️') : '❌输出不一致'}`);
@@ -157,6 +159,8 @@ function runWorkloadExperiment(s, repeat, memFile) {
     variant_verified: n >= 2 && allRan && consistent,
     inputs: n, seeds: 1,
     repeats: repeat, // v0.6：每输入重复测量次数（输入维度 × 重复维度分开）
+    // v0.7：原始重复测量全量保存（每输入 ms_all），不压扁证据链（GPT 审第七份）
+    ms_all: details.map((d) => d.cMsAll),
     novelty_check: s.novelty_check || '',
     improved: better, // v0.6：L4 与「成功」绑定——未超越 baseline 不得进 L4
     failure_reason: better ? '' : ('未超越 baseline（候选均值 ' + cAvg + ' vs baseline ' + bAvg + '）'),

@@ -122,53 +122,55 @@ def run_workload(workload_json: str) -> dict:
             args = inp if isinstance(inp, list) else [inp]
         if not isinstance(args, list):
             args = [args]
+        # v0.7：warmup 与正式测量必须在同一进程/解释器状态里完成——
+        # 拼成一段代码：先 warmup 1 次（不计入），再正式测量 repeat 次，
+        # 输出全部原始测量（_TIMES_ 数组）+ 最终结果（_RESULT_）。
         call_code = "\n".join([
             code,
             "import time as _t, json as _j",
             "_a = " + json.dumps(args, ensure_ascii=False),
-            "_t0 = _t.perf_counter()",
-            "_r = " + func + "(*_a)",
-            "_dt = (_t.perf_counter() - _t0) * 1000",
-            "print('_TIME_ ' + str(_dt))",
+            "def _bench():",
+            "    _t0 = _t.perf_counter()",
+            "    _r = " + func + "(*_a)",
+            "    return (_t.perf_counter() - _t0) * 1000, _r",
+            "_ = _bench()  # warmup（不计入正式测量）",
+            "_ms = []",
+            "_r = None",
+            "for _i in range(" + str(repeat) + "):",
+            "    _m, _r = _bench()",
+            "    _ms.append(_m)",
+            "print('_TIMES_ ' + _j.dumps(_ms))",
             "print('_RESULT_ ' + _j.dumps(_r))",
         ])
-
-        def _run_once():
-            runner = SandboxRunner()
-            runner.enable()
-            return runner.run_code(call_code, language="python")
-
-        # warmup 1 次（不计入正式测量）
-        w = _run_once()
-        if not w.success:
-            per_input.append({"args": args, "ok": False, "ms": None, "result": None,
-                              "error": w.error or w.stderr.strip()})
-            continue
-        ms_all, res = [], None
-        for _ in range(repeat):
-            r = _run_once()
-            if not r.success:
-                per_input.append({"args": args, "ok": False, "ms": None, "result": None,
-                                  "error": r.error or r.stderr.strip()})
-                break
-            ms, res = None, None
-            for line in r.stdout.strip().splitlines():
-                if line.startswith("_TIME_ "):
+        runner = SandboxRunner()
+        runner.enable()
+        result = runner.run_code(call_code, language="python")
+        item = {"args": args, "ok": result.success, "ms": None, "result": None}
+        if result.success:
+            ms_all, res = [], None
+            for line in result.stdout.strip().splitlines():
+                if line.startswith("_TIMES_ "):
+                    raw = line[len("_TIMES_ "):].strip()
                     try:
-                        ms = float(line[len("_TIME_ "):])
-                    except ValueError:
-                        pass
+                        ms_all = [round(float(x), 3) for x in json.loads(raw)]
+                    except Exception:
+                        ms_all = []
                 elif line.startswith("_RESULT_ "):
                     raw = line[len("_RESULT_ "):].strip()
                     try:
                         res = json.loads(raw)
                     except Exception:
                         res = raw
-            ms_all.append(ms)
+            if ms_all:
+                item["ms"] = round(statistics.median(ms_all), 3)
+                item["ms_all"] = ms_all
+            else:
+                item["ok"] = False
+                item["error"] = "未产出测量数据"
+            item["result"] = res
         else:
-            # 全部 repeat 完成 → 取中位数（抗噪，GPT 审第六份）
-            med = round(statistics.median(ms_all), 3)
-            per_input.append({"args": args, "ok": True, "ms": med, "ms_all": ms_all, "result": res})
+            item["error"] = result.error or result.stderr.strip()
+        per_input.append(item)
     return {"ok": True, "per_input": per_input, "error": ""}
 
 

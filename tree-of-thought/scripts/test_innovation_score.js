@@ -100,6 +100,23 @@ t('未超越不得L4（GPT审6：可重复≠成功）', () => {
   assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
 });
 
+// 3e) GPT 审第七份：重复测量次数必须进证据——repeat=5 分数高于 repeat=1
+t('重复次数进评分（GPT审7：证据链不压扁）', () => {
+  const base = {
+    scheme: '跨输入重复测量的候选',
+    different: true,
+    code: true, ran: true,
+    results: [0.02, 0.03, 0.025], baseline: 0.04,
+    inputs: 3, variant_verified: true, improved: true,
+    novelty_check: '检索未见同构方案，无先例',
+  };
+  const r1 = scoreInnovation({ ...base, repeats: 1 });
+  const r5 = scoreInnovation({ ...base, repeats: 5 });
+  assert.ok(r5.total > r1.total);        // 重复证据必须反映到分数（此前 repeat=1/2/5 全一样）
+  assert.ok(r5.dims.robustness > r1.dims.robustness);
+  assert.strictEqual(r5.level, 'L4');    // 且不破坏 L4 判定
+});
+
 // 4) 边界保护：非法数值输入 → 拒绝评分（防 NaN，GPT 挖的坑）
 t('边界保护：非法输入拒绝', () => {
   const r = scoreInnovation({
@@ -139,4 +156,4 @@ t('空证据拒绝', () => {
   assert.ok(r.error);
 });
 
-console.log(`\n${passed}/10 通过`);
+console.log(`\n${passed}/11 通过`);
