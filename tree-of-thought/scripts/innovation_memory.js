@@ -74,6 +74,8 @@ function cmdSave(raw) {
     reproduced: ev.reproduced === true,
     variant_verified: ev.variant_verified === true,
     repeated_same_input: ev.repeated_same_input === true,
+    // GPT 审（第六份）：L4 与「成功」绑定——improved 必须真实优于 baseline
+    improved: ev.improved === true,
   });
   const mem = {
     seed: String(ev.seed), form: String(ev.form), idea: String(ev.idea),

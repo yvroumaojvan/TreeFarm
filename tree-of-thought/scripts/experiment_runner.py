@@ -92,15 +92,16 @@ def verify_code(code: str, verify_json: str) -> dict:
 
 
 def run_workload(workload_json: str) -> dict:
-    """workload 模式（GPT 审第五份：Benchmark 必须真正执行 workload）。
+    """workload 模式（GPT 审第五/六份：Benchmark 必须真正执行 workload + 真正重复测量）。
     workload_json: {
       "code": "def f(a): ...",     # 被测代码（函数定义）
       "func": "f",                  # 被测函数名
-      "inputs": [ {"args": [...]}, ... ]   # 每组输入（真实数据）
+      "inputs": [ {"args": [...]}, ... ],  # 每组输入（真实数据）
+      "repeat": 3                   # 每输入重复测量次数（v0.6：输入维度 × 重复维度彻底分开）
     }
-    对每组输入：把「定义 + 真实调用 func(*args) + 计时」拼成一段代码进沙箱执行，
-    输出 per_input = [{args, ms, result, ok}]——测的是 algorithm(input) 的真性能，
-    而不是"定义函数/解析脚本"的时间（此前 B-001 只测了解析时间）。
+    对每组输入：warmup 1 次（不计入，稳定解释器/缓存）→ repeat 次正式测量，
+    输出 per_input = [{args, ms(median), ms_all, result, ok}]——
+    测的是 algorithm(input) 的真性能 + 抗噪中位数，而不是单次抖动值。
     """
     try:
         spec = json.loads(workload_json)
@@ -111,6 +112,8 @@ def run_workload(workload_json: str) -> dict:
     inputs = spec.get("inputs") or []
     if not inputs:
         return {"ok": True, "per_input": [], "error": ""}
+    repeat = max(1, int(spec.get("repeat") or 1))
+    import statistics
     per_input = []
     for i, inp in enumerate(inputs):
         if isinstance(inp, dict) and "args" in inp:
@@ -129,16 +132,30 @@ def run_workload(workload_json: str) -> dict:
             "print('_TIME_ ' + str(_dt))",
             "print('_RESULT_ ' + _j.dumps(_r))",
         ])
-        runner = SandboxRunner()
-        runner.enable()
-        result = runner.run_code(call_code, language="python")
-        item = {"args": args, "ok": result.success, "ms": None, "result": None}
-        if result.success:
+
+        def _run_once():
+            runner = SandboxRunner()
+            runner.enable()
+            return runner.run_code(call_code, language="python")
+
+        # warmup 1 次（不计入正式测量）
+        w = _run_once()
+        if not w.success:
+            per_input.append({"args": args, "ok": False, "ms": None, "result": None,
+                              "error": w.error or w.stderr.strip()})
+            continue
+        ms_all, res = [], None
+        for _ in range(repeat):
+            r = _run_once()
+            if not r.success:
+                per_input.append({"args": args, "ok": False, "ms": None, "result": None,
+                                  "error": r.error or r.stderr.strip()})
+                break
             ms, res = None, None
-            for line in result.stdout.strip().splitlines():
+            for line in r.stdout.strip().splitlines():
                 if line.startswith("_TIME_ "):
                     try:
-                        ms = round(float(line[len("_TIME_ "):]), 3)
+                        ms = float(line[len("_TIME_ "):])
                     except ValueError:
                         pass
                 elif line.startswith("_RESULT_ "):
@@ -147,11 +164,11 @@ def run_workload(workload_json: str) -> dict:
                         res = json.loads(raw)
                     except Exception:
                         res = raw
-            item["ms"] = ms
-            item["result"] = res
+            ms_all.append(ms)
         else:
-            item["error"] = result.error or result.stderr.strip()
-        per_input.append(item)
+            # 全部 repeat 完成 → 取中位数（抗噪，GPT 审第六份）
+            med = round(statistics.median(ms_all), 3)
+            per_input.append({"args": args, "ok": True, "ms": med, "ms_all": ms_all, "result": res})
     return {"ok": True, "per_input": per_input, "error": ""}
 
 

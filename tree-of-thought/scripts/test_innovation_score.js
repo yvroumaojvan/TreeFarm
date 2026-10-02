@@ -38,7 +38,7 @@ t('L3 可执行创新', () => {
   assert.strictEqual(r.dims.experiment, 20);
 });
 
-// 3) L4：多次实验稳定 + 换输入/种子 + 新颖性证据 → L4（65-84）
+// 3) L4：多次实验稳定 + 换输入/种子 + 新颖性证据 + 真实优于 baseline → L4（65-84）
 t('L4 可重复创新', () => {
   const r = scoreInnovation({
     scheme: '融合马尔可夫与指纹检索的混合索引',
@@ -48,6 +48,7 @@ t('L4 可重复创新', () => {
     baseline: 80.1,
     inputs: 3, seeds: 2, variant_verified: true,
     novelty_check: '检索未见同构方案，无先例，与已有 LSH 不是重复',
+    improved: true,   // v0.6：L4 必须真实优于 baseline
   });
   assert.strictEqual(r.level, 'L4');
   assert.ok(r.dims.robustness >= 15);
@@ -80,6 +81,22 @@ t('同输入重复不得冒充L4（GPT审5：跨条件证据才算）', () => {
     repeated_same_input: true,   // 只证明运行稳定，不证明换条件仍成立
   });
   assert.strictEqual(r.level, 'L3');   // 缺跨条件可重复证据 → 不能 L4
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+// 3d) GPT 审第六份：跨条件可重复但未超越 baseline → 不得 L4（可重复≠成功）
+t('未超越不得L4（GPT审6：可重复≠成功）', () => {
+  const r = scoreInnovation({
+    scheme: '与 baseline 等价但更慢的候选',
+    different: true,
+    code: true, ran: true,
+    results: [0.136, 0.022, 0.026],   // 跨输入都跑了
+    baseline: 0.06,
+    inputs: 3, variant_verified: true,
+    novelty_check: '检索未见同构方案，无先例',
+    improved: false,   // 没超过 baseline
+  });
+  assert.strictEqual(r.level, 'L3');   // 跨条件可重复但未成功 → 不能 L4
   assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
 });
 
@@ -122,4 +139,4 @@ t('空证据拒绝', () => {
   assert.ok(r.error);
 });
 
-console.log(`\n${passed}/9 通过`);
+console.log(`\n${passed}/10 通过`);

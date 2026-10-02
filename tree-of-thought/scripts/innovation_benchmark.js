@@ -28,7 +28,7 @@ function runPython(...args) {
 function runExp(...args) {
   return execFileSync('node', [path.join(DIR, 'innovation_experiment.js'), ...args], { encoding: 'utf8' });
 }
-function fail(msg) { console.error('❌ ' + msg); process.exit(1); }
+function fail(msg) { console.error('❌ ' + msg); process.exit(2); } // 参数/环境错误 → exit 2
 
 function loadBench() {
   let d;
@@ -86,8 +86,10 @@ function runOne(id, opts) {
   try {
     console.log(runExp(...expArgs));
   } catch (e) {
-    console.error('⚠️ 实验桥异常：' + e.message);
-    process.exit(1);
+    // v0.6 机器语义（GPT 审第六份）：成功→0，实验失败→1，参数/环境错误→2。
+    // 用户友好中文已在 stderr，这里只透传退出码，不让 CI 把失败当成功。
+    if (e.stderr) console.error(e.stderr.trim());
+    process.exit(e.status === 2 ? 2 : 1);
   }
 }
 

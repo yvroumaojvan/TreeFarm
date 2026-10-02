@@ -168,12 +168,16 @@ function scoreInnovation(evidence) {
   // 因此不再单独作为 L4 门槛（GPT：同输入跑三次 → 系统直接回答「不够」）。
   const reproducible = (evidence.reproduced === true ||
                         evidence.variant_verified === true);
+  // GPT 审（第六份）修复：L4 还要真实优于 baseline——「可重复」和「成功」必须绑定，
+  // 否则一个没超过 baseline 的候选（improved=false）也能靠跨输入证据混进 L4。
+  const successful = evidence.improved === true;
   if (total >= 85) {
     // L5 硬门槛：可复现的新知识必须经过外部独立验证（GPT：其他人也能得到类似结论）
-    if (evidence.external_verified === true) level = 'L5';
-    else level = 'L4'; // 高分但缺外部验证 → 按 L4 计（硬门槛机制）
+    if (evidence.external_verified === true && successful) level = 'L5';
+    else if (successful) level = 'L4'; // 高分但缺外部验证 → 按 L4 计（硬门槛机制）
+    else level = 'L3'; // 高分但未优于 baseline → 不算可复现新知识
   } else if (total >= 65) {
-    level = reproducible ? 'L4' : 'L3'; // 高分但缺可重复证据 → 降 L3（GPT 审伪 L4 修复）
+    level = (reproducible && successful) ? 'L4' : 'L3'; // 缺跨条件证据或未超越 → 降 L3
   } else if (total >= 40) level = 'L3';
   else if (total >= 20) level = 'L2';
   else level = 'L1';
@@ -181,8 +185,12 @@ function scoreInnovation(evidence) {
   if (total >= 85 && evidence.external_verified !== true) {
     notes.push('总分达到 L5 区间但缺少外部独立验证（external_verified），按硬门槛降为 L4');
   }
-  if (total >= 65 && !reproducible) {
-    notes.push('总分达到 L4 区间但缺少跨条件可重复证据（reproduced/variant_verified），按硬门槛降为 L3');
+  if (total >= 85 && !successful) {
+    notes.push('总分达到 L5 区间但未优于 baseline（improved=false），按硬门槛降为 L3');
+  }
+  if (total >= 65 && !(reproducible && successful)) {
+    const why = !reproducible ? '缺少跨条件可重复证据（reproduced/variant_verified）' : '未优于 baseline（improved=false）';
+    notes.push('总分达到 L4 区间但' + why + '，按硬门槛降为 L3');
   }
   return { dims, total, level, ...(notes.length ? { notes } : {}) };
 }
