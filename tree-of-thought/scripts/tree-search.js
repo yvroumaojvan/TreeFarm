@@ -61,21 +61,85 @@ function newState() {
 }
 
 function loadState(file) {
+  var raw;
   try {
-    var raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!raw.nodes) throw new Error('不是合法的思维树状态文件');
-    return raw;
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
+    // 文件不存在 → 全新状态是合理默认（首次运行）
+    if (e && e.code === 'ENOENT') return newState();
+    // 解析失败 / 读取失败 → 绝不静默重置，抛错并保留损坏文件
+    console.error('✖ 状态文件解析失败，已保留原文件未做任何修改: ' + file);
+    console.error('  原因: ' + e.message);
+    process.exit(1);
+  }
+
+  // M7：关键字段校验——合法 JSON 但缺 nodes（如初始化占位 {}）→ 宽容重置
+  // （数据丢失防护针对 JSON 语法损坏/半截文件，上面解析失败分支已报错）
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+      || !raw.nodes || typeof raw.nodes !== 'object' || Array.isArray(raw.nodes)) {
     return newState();
   }
-}
 
+  // 补齐顶层缺省字段
+  if (typeof raw.trunk !== 'string') raw.trunk = '';
+  raw.strategy = (['bfs', 'dfs', 'beam'].indexOf(raw.strategy) >= 0) ? raw.strategy : DEFAULT_STRATEGY;
+  raw.beam_width = Number.isFinite(raw.beam_width) ? raw.beam_width : DEFAULT_BEAM;
+  raw.max_depth = Number.isFinite(raw.max_depth) ? raw.max_depth : DEFAULT_DEPTH;
+  if (!Array.isArray(raw.order)) raw.order = [];
+  raw.version = raw.version || 3;
+
+  var order = [];
+  var seen = {};
+  var maxSeq = 0;
+
+  Object.keys(raw.nodes).forEach(function (id) {
+    var n = raw.nodes[id];
+    if (!n || typeof n !== 'object' || Array.isArray(n)) {
+      console.error('✖ 状态文件含非法节点（非对象）: ' + id);
+      process.exit(1);
+    }
+    if (typeof n.id !== 'string' || !n.id) {
+      console.error('✖ 状态文件含缺 id 的节点: ' + id);
+      process.exit(1);
+    }
+    // 补默认值
+    if (!n.status) n.status = 'open';
+    if (!Array.isArray(n.children)) n.children = [];
+    if (typeof n.pruned !== 'boolean') n.pruned = false;
+    if (!n.created_at) n.created_at = Date.now();
+    if (n.score === undefined) n.score = null;
+
+    // O4：从任意 id 提取最大序号，覆盖 n_12 等多种历史命名
+    var m = /(\d+)\s*$/.exec(n.id);
+    if (m) {
+      var num = parseInt(m[1], 10);
+      if (Number.isFinite(num) && num > maxSeq) maxSeq = num;
+    }
+    if (!seen[n.id]) { seen[n.id] = true; order.push(n.id); }
+  });
+
+  // 用真实存在节点重建 order：优先原 order 里仍有效的顺序，再补漏
+  var finalOrder = [];
+  raw.order.forEach(function (id) {
+    if (seen[id] && finalOrder.indexOf(id) === -1) finalOrder.push(id);
+  });
+  order.forEach(function (id) {
+    if (finalOrder.indexOf(id) === -1) finalOrder.push(id);
+  });
+  raw.order = finalOrder;
+
+  // O4：seq = 已分配的最大节点序号（nextId 是 seq+=1 后取号，seq 语义=已分配最大号）
+  raw.seq = maxSeq;
+
+  return raw;
+}
 function saveState(state, file) {
   state.updated_at = new Date().toISOString();
-  fs.writeFileSync(file, JSON.stringify(state, null, 2));
+  var tmp = file + '.tmp';
+  var data = JSON.stringify(state, null, 2);
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);   // 原子覆盖：先写 .tmp 再 rename，避免半截文件
 }
-
-/* ---------------- 节点工具 ---------------- */
 function nextId(state) {
   state.seq += 1;
   return 'n_' + state.seq;
@@ -111,20 +175,27 @@ function openNodes(state) {
   return out;
 }
 
-function totalScore(score) {
-  if (!score) return null;
-  var s = 0;
-  Object.keys(SCORE_WEIGHTS).forEach(function (k) {
-    s += (score[k] || 0) * SCORE_WEIGHTS[k];
-  });
-  return Math.round(s * 100) / 100;
+function clampScore01(v) {
+  // 非法/非数值 → 0；越界 → 钳制到 [0,1]
+  if (!Number.isFinite(v)) return 0;
+  if (v < 0) return 0;
+  if (v > 1) return 1;
+  return v;
 }
 
-/* ---------------- 文本相似度（弱信号聚类用） ----------------
- * 单一 n-gram 对中文短句不鲁棒（"先攒钱再辞职" vs "攒够钱再走"
- * 的 3-gram 几乎不重合）。用混合相似度：
- *   mixed = max(trigram Jaccard, bigram 余弦)
- * 英文/代码靠 trigram，中文短句靠 bigram 余弦，取两者最优。 */
+function totalScore(score) {
+  if (!score || typeof score !== 'object') return null;
+  var hasAny = false;
+  var s = 0;
+  Object.keys(SCORE_WEIGHTS).forEach(function (k) {
+    if (score[k] !== undefined) hasAny = true;
+    var v = Number.isFinite(score[k]) ? score[k] : 0;
+    s += v * SCORE_WEIGHTS[k];
+  });
+  if (!hasAny) return null;
+  if (!Number.isFinite(s)) return 0;
+  return Math.round(s * 100) / 100;
+}
 function ngrams(text, n) {
   var t = String(text).toLowerCase().replace(/\s+/g, ' ');
   var out = [];
@@ -132,20 +203,60 @@ function ngrams(text, n) {
   return out;
 }
 
+function charSimilarity(a, b) {
+  // 字符级相似度：共同字符率 + 归一化编辑距离，两者取最优
+  var ta = String(a == null ? '' : a).toLowerCase().replace(/\s+/g, '');
+  var tb = String(b == null ? '' : b).toLowerCase().replace(/\s+/g, '');
+  if (!ta && !tb) return 1;
+  if (!ta || !tb) return 0;
+  if (ta === tb) return 1;
+
+  // 共同字符率（多重集合交集 / 较大集合大小）
+  var ca = {}, cb = {};
+  for (var i = 0; i < ta.length; i++) ca[ta[i]] = (ca[ta[i]] || 0) + 1;
+  for (var j = 0; j < tb.length; j++) cb[tb[j]] = (cb[tb[j]] || 0) + 1;
+  var inter = 0, totalA = 0, totalB = 0;
+  Object.keys(ca).forEach(function (ch) {
+    totalA += ca[ch];
+    if (cb[ch]) inter += Math.min(ca[ch], cb[ch]);
+  });
+  Object.keys(cb).forEach(function (ch) { totalB += cb[ch]; });
+  var maxLen = Math.max(totalA, totalB);
+  var common = maxLen ? inter / maxLen : 0;
+
+  // 归一化编辑距离（Levenshtein）
+  var la = ta.length, lb = tb.length;
+  var prev = [], cur = [];
+  for (var k = 0; k <= lb; k++) prev[k] = k;
+  for (var r = 1; r <= la; r++) {
+    cur[0] = r;
+    for (var c = 1; c <= lb; c++) {
+      var cost = ta[r - 1] === tb[c - 1] ? 0 : 1;
+      cur[c] = Math.min(prev[c] + 1, cur[c - 1] + 1, prev[c - 1] + cost);
+    }
+    var tmp = prev; prev = cur; cur = tmp;
+  }
+  var dist = prev[lb];
+  var editSim = Math.max(la, lb) ? 1 - dist / Math.max(la, lb) : 0;
+
+  return Math.max(common, editSim);
+}
+
 function jaccard(a, b) {
   var ga = ngrams(a, 3), gb = ngrams(b, 3);
-  if (!ga.length || !gb.length) return 0;
+  // M9：n-gram 长度不足（单字/纯数字/空串）→ 回退字符级相似度
+  if (!ga.length || !gb.length) return charSimilarity(a, b);
   var sa = {}, sb = {}, inter = 0;
   ga.forEach(function (g) { sa[g] = true; });
   gb.forEach(function (g) { sb[g] = true; });
   Object.keys(sa).forEach(function (g) { if (sb[g]) inter++; });
   var union = Object.keys(sa).length + Object.keys(sb).length - inter;
-  return union ? inter / union : 0;
+  return union ? inter / union : charSimilarity(a, b);
 }
-
 function bigramCosine(a, b) {
   var ga = ngrams(a, 2), gb = ngrams(b, 2);
-  if (!ga.length || !gb.length) return 0;
+  // M9：bigram 不足 → 回退字符级相似度（让单字也能判相似）
+  if (!ga.length || !gb.length) return charSimilarity(a, b);
   var sa = {}, sb = {}, inter = 0;
   ga.forEach(function (g) { sa[g] = (sa[g] || 0) + 1; });
   gb.forEach(function (g) { sb[g] = (sb[g] || 0) + 1; });
@@ -153,9 +264,9 @@ function bigramCosine(a, b) {
     if (sb[g]) inter += Math.min(sa[g], sb[g]);
   });
   var norm = Math.sqrt(ga.length) * Math.sqrt(gb.length);
-  return norm ? inter / norm : 0;
+  if (!norm) return charSimilarity(a, b);
+  return inter / norm;
 }
-
 function mixedSimilarity(a, b) {
   return Math.max(jaccard(a, b), bigramCosine(a, b));
 }
@@ -193,11 +304,15 @@ function prune(state) {
     var n = state.nodes[id];
     if (!n.children.length || n.status === 'dead_end') return;
     var kids = n.children.map(function (cid) { return state.nodes[cid]; })
-      .filter(function (k) { return k.status !== 'pruned'; });
+      .filter(function (k) { return k && k.status !== 'pruned'; });
     if (kids.length <= state.beam_width) return;
+    // M1：无分（totalScore 为 null）节点永远排最后，绝不优先剪掉有分节点
     kids.sort(function (a, b) {
       var sa = totalScore(a.score), sb = totalScore(b.score);
-      if (sa !== null && sb !== null && sa !== sb) return sb - sa;
+      if (sa === null && sb === null) return state.order.indexOf(a.id) - state.order.indexOf(b.id);
+      if (sa === null) return 1;    // a 无分 → 排后
+      if (sb === null) return -1;   // b 无分 → a 排前
+      if (sa !== sb) return sb - sa;
       return state.order.indexOf(a.id) - state.order.indexOf(b.id);
     });
     kids.slice(state.beam_width).forEach(function (k) {
@@ -207,7 +322,6 @@ function prune(state) {
   });
   return pruned;
 }
-
 function markPruned(state, id) {
   var n = state.nodes[id];
   if (!n || n.pruned) return;
@@ -303,7 +417,7 @@ function maxBranchDepth(state) {
 /* ---------------- 收敛检测 ---------------- */
 function converge(state, threshold) {
   var t = threshold || CONVERGE_THRESHOLD;
-  // 取最深的两个分支层的结论集合，算 Jaccard 相似度
+  // 取最深的两个分支层的结论集合，算相似度
   var depths = {};
   Object.keys(state.nodes).forEach(function (id) {
     var n = state.nodes[id];
@@ -317,21 +431,28 @@ function converge(state, threshold) {
   }
   var older = depths[ds[ds.length - 2]].map(function (n) { return (n.content || {}).conclusion || ''; });
   var newer = depths[ds[ds.length - 1]].map(function (n) { return (n.content || {}).conclusion || ''; });
+
+  // S4：newer 为空时必须返回 false，不能 sim=1 误判收敛
+  if (!newer.length) {
+    return { converged: false, similarity: null, note: '最新分支层无有效结论，无法判断收敛' };
+  }
+  if (!older.length) {
+    return { converged: false, similarity: 0, note: '上一层无有效结论，无参照无法判断收敛' };
+  }
+
   // 两轮结论集合的重叠率（新结论中有多少能在旧结论里找到相似簇）
   var matched = 0;
   newer.forEach(function (txt) {
     var hit = older.some(function (o) { return mixedSimilarity(txt, o) > CLUSTER_THRESHOLD; });
     if (hit) matched++;
   });
-  var sim = newer.length ? matched / newer.length : 1;
+  var sim = matched / newer.length;
   return {
     converged: sim >= t,
     similarity: Math.round(sim * 100) / 100,
     note: sim >= t ? '相邻两轮结论高度重合，已收敛' : '仍有新结论，继续搜索',
   };
 }
-
-/* ---------------- 渲染 ---------------- */
 function render(state, compact) {
   var lines = [];
   var total = Object.keys(state.nodes).length;
@@ -364,8 +485,15 @@ function nodeText(n) {
   return (c && (c.conclusion || c.dimension || c.hypothesis)) || '';
 }
 
-function renderNode(lines, state, id, prefix, isLast, compact) {
+function renderNode(lines, state, id, prefix, isLast, compact, depthGuard) {
+  // O3：递归深度保护，防栈溢出
+  var d = depthGuard || 0;
+  if (d > 500) {
+    lines.push(prefix + (isLast ? '└── ' : '├── ') + '…（层级过深，已截断）');
+    return;
+  }
   var n = state.nodes[id];
+  if (!n) return;
   var label = '';
   if (n.type === 'trunk') {
     label = '🌳 树干：' + truncate(nodeText(n), 40);
@@ -388,10 +516,9 @@ function renderNode(lines, state, id, prefix, isLast, compact) {
   var childPrefix = prefix + (isLast ? '    ' : '│   ');
   var kids = n.children;
   for (var i = 0; i < kids.length; i++) {
-    renderNode(lines, state, kids[i], childPrefix, i === kids.length - 1, compact);
+    renderNode(lines, state, kids[i], childPrefix, i === kids.length - 1, compact, d + 1);
   }
 }
-
 function truncate(s, max) {
   s = String(s || '').replace(/\s+/g, ' ').trim();
   return s.length > max ? s.slice(0, max) + '…' : s;
@@ -454,8 +581,18 @@ function main() {
     state = newState();
     state.trunk = trunk || '(未命名问题)';
     state.strategy = (['bfs', 'dfs', 'beam'].indexOf(opts.strategy) >= 0) ? opts.strategy : DEFAULT_STRATEGY;
-    state.beam_width = opts.beam || DEFAULT_BEAM;
-    state.max_depth = opts.depth || DEFAULT_DEPTH;
+
+    // init 校验：beam 必须 >= 1
+    var beamVal = (opts.beam === undefined || !Number.isFinite(opts.beam)) ? DEFAULT_BEAM : opts.beam;
+    if (beamVal < 1) {
+      console.log('✖ beam 必须 >= 1，当前收到: ' + opts.beam);
+      process.exit(1);
+    }
+    state.beam_width = beamVal;
+
+    var depthVal = (opts.depth === undefined || !Number.isFinite(opts.depth)) ? DEFAULT_DEPTH : opts.depth;
+    state.max_depth = depthVal >= 1 ? depthVal : DEFAULT_DEPTH;
+
     var root = newNode(state, null, 'trunk', state.trunk);
     root.status = 'expanded';
     state.last_action = 'init';
@@ -473,6 +610,20 @@ function main() {
       console.log('✖ 分支 JSON 解析失败: ' + e.message); process.exit(1);
     }
     if (!Array.isArray(branches)) branches = [branches];
+
+    // S2：先校验全部元素，任一非法直接报错，不写任何状态
+    if (branches.length === 0) {
+      console.log('⚠️ 分支数组为空：expand 需要至少 1 个分支，请检查 JSON 格式');
+      process.exit(1);
+    }
+    for (var bi = 0; bi < branches.length; bi++) {
+      var bb = branches[bi];
+      if (!bb || typeof bb !== 'object' || Array.isArray(bb)) {
+        console.log('✖ 分支 [' + bi + '] 非法：必须是对象（非 null / 非数组）');
+        process.exit(1);
+      }
+    }
+
     var parent = state.nodes[pid];
     if (parent.status === 'pruned' || parent.status === 'dead_end') {
       console.log('✖ 节点 ' + pid + ' 已' + (parent.status === 'pruned' ? '剪枝' : '死路')
@@ -482,14 +633,12 @@ function main() {
     if (parent.status !== 'expanded' && parent.status !== 'scored') {
       console.log('⚠️ 节点 ' + pid + ' 状态为 ' + parent.status + '，建议先 select 选可展开节点');
     }
-    // r37：空分支数组友好拒绝（不产生 0 个节点的无效展开）
-    if (branches.length === 0) {
-      console.log('⚠️ 分支数组为空：expand 需要至少 1 个分支，请检查 JSON 格式');
-      process.exit(1);
-    }
+
     parent.status = 'expanded';
     var ids = branches.map(function (b) {
-      return newNode(state, pid, b.type === 'consensus' ? 'consensus' : 'branch', b).id;
+      // S2：b && b.type 防御
+      var t = (b && b.type === 'consensus') ? 'consensus' : 'branch';
+      return newNode(state, pid, t, b).id;
     });
     state.last_action = 'expand ' + pid;
     saveState(state, opts.state);
@@ -503,19 +652,35 @@ function main() {
     } catch (e) {
       console.log('✖ 评分 JSON 解析失败: ' + e.message); process.exit(1);
     }
+    if (!sc || typeof sc !== 'object' || Array.isArray(sc)) {
+      console.log('✖ 评分必须是一个对象，例如 {"evidence":0.9,"relevance":0.8,"novelty":0.6,"verifiable":0.7}');
+      process.exit(1);
+    }
     if (!state.nodes[sid]) { console.log('✖ 节点不存在: ' + sid); process.exit(1); }
     if (state.nodes[sid].status === 'pruned' || state.nodes[sid].status === 'dead_end') {
       console.log('✖ 节点 ' + sid + ' 已' + (state.nodes[sid].status === 'pruned' ? '剪枝' : '死路')
         + '，禁止评分——它已退出搜索');
       process.exit(1);
     }
-    sc.total = totalScore(sc);
-    state.nodes[sid].score = sc;
+
+    // S1：4 维输入校验——非法变 0，越界钳制到 [0,1]，总分永远有限
+    var clean = {};
+    Object.keys(SCORE_WEIGHTS).forEach(function (k) {
+      clean[k] = clampScore01(sc[k]);
+      if (sc[k] !== undefined && !Number.isFinite(sc[k])) {
+        console.log('⚠️ 维度 ' + k + ' 非数值，已置 0');
+      } else if (Number.isFinite(sc[k]) && (sc[k] < 0 || sc[k] > 1)) {
+        console.log('⚠️ 维度 ' + k + ' 越界，已钳制到 ' + clean[k]);
+      }
+    });
+    clean.total = totalScore(clean);
+
+    state.nodes[sid].score = clean;
     state.nodes[sid].status = 'scored';
     state.last_action = 'score ' + sid;
     saveState(state, opts.state);
-    console.log('📊 ' + sid + ' 综合评分 = ' + sc.total + '（证据' + (sc.evidence || 0)
-      + ' 相关' + (sc.relevance || 0) + ' 新颖' + (sc.novelty || 0) + ' 可验证' + (sc.verifiable || 0) + '）');
+    console.log('📊 ' + sid + ' 综合评分 = ' + clean.total + '（证据' + clean.evidence
+      + ' 相关' + clean.relevance + ' 新颖' + clean.novelty + ' 可验证' + clean.verifiable + '）');
   } else if (cmd === 'select') {
     var sel = select(state);
     if (!sel) {
@@ -565,7 +730,7 @@ function main() {
     fs.writeFileSync(rest[1], JSON.stringify(state, null, 2));
     console.log('💾 已保存到 ' + rest[1]);
   } else if (cmd === 'load' && rest.length >= 2) {
-    state = loadState(rest[1]);
+    state = loadState(rest[1]);   // 校验 + 补默认 + 重算 seq 都在 loadState 内完成
     saveState(state, opts.state);
     console.log('📂 已加载 ' + rest[1] + ' → 树干: ' + truncate(state.trunk, 40));
   } else if (cmd === 'status') {

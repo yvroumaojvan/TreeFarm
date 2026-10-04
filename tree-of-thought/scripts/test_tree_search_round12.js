@@ -67,11 +67,20 @@ test('评分越界（>1）：综合分仍可算（不崩）', function () {
   cleanup(s);
 });
 
-test('损坏状态文件：自动回退新状态', function () {
+test('损坏状态文件：报错并保留原文件（不静默丢数据）', function () {
   var f = path.join(os.tmpdir(), 'tf_r12_bad_' + Date.now() + '.json');
   fs.writeFileSync(f, 'not json {{{');
-  var out = run(['status'], f);
-  assert.ok(out.indexOf('状态') >= 0, out);
+  // S5 修复：JSON 语法损坏 = 必须报错退出（绝不静默重置丢数据），原文件保留
+  var failed = false;
+  try {
+    run(['status'], f);
+  } catch (e) {
+    failed = true;
+    assert.ok(e.stderr && e.stderr.indexOf('解析失败') >= 0, '应提示解析失败，实际: ' + e.stderr);
+    assert.ok(e.status !== 0, '退出码应非 0');
+  }
+  assert.ok(failed, '损坏文件应报错退出');
+  assert.equal(fs.readFileSync(f, 'utf8'), 'not json {{{', '原文件应保留未修改');
   cleanup(f);
 });
 
