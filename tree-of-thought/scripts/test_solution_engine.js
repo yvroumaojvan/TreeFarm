@@ -92,7 +92,10 @@ test('7) classifyLevel：L1/L2/L3 及 evidence 提升', () => {
 
   assert.equal(SE.classifyLevel(one, {}).level, 'L1');
   assert.equal(SE.classifyLevel(two, {}).level, 'L2');
-  assert.equal(SE.classifyLevel(three, {}).level, 'L3');
+  // 3 个不同 essence 但未 ran → 停在 L2（L3 必须真正运行过，2026-10-04 4.1 审查修复）
+  const threeLv = SE.classifyLevel(three, {});
+  assert.equal(threeLv.level, 'L2');
+  assert.ok(threeLv.notes && threeLv.notes.includes('未运行验证'), '应有升级提示');
 
   // evidence.ran=true → 不低于 L3
   const ranLevel = SE.classifyLevel(one, { ran: true });

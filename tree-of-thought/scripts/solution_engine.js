@@ -67,16 +67,13 @@ const BUG_MAP = {
 const GENERIC_FALLBACK = ['INPUT_VALIDATION', 'BOUNDS_CHECK', 'OBSERVABILITY', 'FALLBACK'];
 
 function pickEssenceKeys(bugType, preferCount) {
+  const out = [];
   const pre = BUG_MAP[bugType] || GENERIC_FALLBACK;
-  const out = pre.slice(0, Math.max(2, preferCount - 1));
-  for (const k of GENERIC_FALLBACK) if (out.length < preferCount && !out.includes(k)) out.push(k);
-  for (const e of ESSENCES) if (out.length < preferCount && !out.includes(e.key)) out.push(e.key);
+  for (const k of pre) if (!out.includes(k)) out.push(k);
+  for (const k of GENERIC_FALLBACK) if (!out.includes(k)) out.push(k);
+  for (const e of ESSENCES) if (!out.includes(e.key)) out.push(e.key);
   return out.slice(0, preferCount);
 }
-
-// ---------------------------------------------------------------------------
-// II. 方案生成（本质不同 = essence 全局唯一）
-// ---------------------------------------------------------------------------
 function buildSolutions(analysis, count) {
   const a = analysis || {};
   // k = 总方案数（含最后固定的 TRANSFORM），clamp 3..7；ESSENCE 占 k-1 个名额
@@ -86,7 +83,6 @@ function buildSolutions(analysis, count) {
     const e = ESSENCES.find((x) => x.key === key);
     if (!e) return null;
     return {
-      order: i + 1,
       label: e.name,
       essence: e.key,
       essence_desc: e.desc,
@@ -101,7 +97,6 @@ function buildSolutions(analysis, count) {
   // 补一个"跳出函数层"方案（GPT：甚至不是优化这个函数，而是改变整个调用方式）
   const tx = TRANSFORM_LEVELS[Math.floor(Math.random() * TRANSFORM_LEVELS.length)];
   solutions.push({
-    order: k,
     label: '跳出函数层：' + tx.slice(0, 16) + '…',
     essence: 'TRANSFORM',
     essence_desc: '改变调用方式/数据模型/边界位置',
@@ -112,15 +107,24 @@ function buildSolutions(analysis, count) {
     compat: '高风险（需整体测试）',
     impl_hint: '见 Host 填充：描述调用侧/数据模型的重构方案',
   });
+  // order 在 filter(Boolean) 之后再统一编号（1..n），TRANSFORM 的 order = solutions.length+1
+  solutions.forEach((s, i) => { s.order = i + 1; });
   autofill(analysis, solutions);
   return solutions;
 }
-
-// 差异度自检（概念级）：essence 必须全部唯一，重复即视为同一方案的不同措辞
 function distinctCheck(solutions) {
+  const sols = Array.isArray(solutions) ? solutions : [];
+  if (sols.length === 0) {
+    return {
+      ok: false,
+      distinctCount: 0,
+      duplicates: [],
+      message: '空方案集（无本质可判定）',
+    };
+  }
   const seen = new Set();
   const dup = [];
-  for (const s of solutions) {
+  for (const s of sols) {
     if (seen.has(s.essence)) dup.push(s.essence);
     seen.add(s.essence);
   }
@@ -131,10 +135,6 @@ function distinctCheck(solutions) {
     message: dup.length ? ('⚠️ 存在本质重复的方案（' + dup.join('、') + '）——同一修复换措辞，应合并') : '✅ 全部方案本质不同（essence ' + seen.size + ' 类）',
   };
 }
-
-// ---------------------------------------------------------------------------
-// III. TreeOfThought 展开骨架（每个方案一棵子树）
-// ---------------------------------------------------------------------------
 function expandForTot(s) {
   return {
     node: s.label,
@@ -158,20 +158,22 @@ function classifyLevel(solutions, evidence) {
   const distinct = new Set(sols.map((s) => s.essence)).size;
   let level = 1; // 至少有一个方案
   // L1 替代方案：还有什么修法？
-  if (distinct >= 2 && distinctCheck(sols).ok) level = 2;
+  if (distinct >= 2) level = 2;
   // L2 组合方案：A+B 组合能否解决？（存在 >3 类 essence 即视为有组合空间）
-  if (distinct >= 3) level = 3;
+  if (distinct >= 3) level = 2;
   // L3 代码级创新：生成代码并真正运行（沙箱验证过）
-  if (ev.ran === true) level = 3;
+  if (ev.ran === true) level = Math.max(level, 3);
   // L4 验证型创新：方案不仅能工作，而且在当前问题上确实改进（验证后端结论）
-  if (ev.improved === true) level = 4;
+  if (ev.ran === true && ev.improved === true) level = Math.max(level, 4);
+  const baseMeaning = ['L1 替代方案：还有什么修法', 'L2 组合方案：A+B 组合能不能解决', 'L3 代码级创新：生成代码并真正运行', 'L4 验证型创新：方案有效且确实改进'][level - 1];
+  const notes = distinct >= 3 && ev.ran !== true ? '方案足够多但未运行验证，生成并运行代码可升级 L3' : null;
   return {
     level: 'L' + level,
-    meaning: ['L1 替代方案：还有什么修法', 'L2 组合方案：A+B 组合能不能解决', 'L3 代码级创新：生成代码并真正运行', 'L4 验证型创新：方案有效且确实改进'][level - 1],
+    meaning: baseMeaning,
+    notes,
     distinctEssences: distinct,
   };
 }
-
 function truncate(s, n) { return String(s).length > n ? String(s).slice(0, n) + '…' : String(s); }
 function autofill(analysis, solutions) {
   for (const s of solutions) {

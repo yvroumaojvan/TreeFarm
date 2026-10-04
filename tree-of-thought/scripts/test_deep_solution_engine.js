@@ -163,6 +163,27 @@ test('深6. 全链路：analyze 方案 → expand 子树 → levels 分级一致
     assert.equal(t.children.length, 5);
   }
   const lv = SE.classifyLevel(sols, {});
-  assert.ok(lv.level === 'L2' || lv.level === 'L3', '5 个不同 essence 应 L2/L3，实际 ' + lv.level);
+  // 2026-10-04 语义修复：5 个 essence 但无 ran → L2（L3 必须真正运行过）
+  assert.equal(lv.level, 'L2', '5 个 essence 未 ran 应 L2，实际 ' + lv.level);
   assert.equal(lv.distinctEssences, 5);
+});
+
+// ---------- 7) 4.1 审查修复回归（S2/S4/S7） ----------
+test('深7. 审查修复回归：L3 需 ran / BUG_MAP 不截断 / 空集不判通过', () => {
+  // S2：3+ 个不同 essence 无 ran → L2 + notes（不能伪装 L3）
+  const lv = SE.classifyLevel([{ essence: 'A' }, { essence: 'B' }, { essence: 'C' }], {});
+  assert.equal(lv.level, 'L2');
+  assert.ok(lv.notes && lv.notes.includes('升级 L3'), '应有升级提示，实际 ' + lv.notes);
+  // ran=true → L3
+  assert.equal(SE.classifyLevel([{ essence: 'A' }], { ran: true }).level, 'L3');
+  // ran+improved → L4
+  assert.equal(SE.classifyLevel([{ essence: 'A' }], { ran: true, improved: true }).level, 'L4');
+  // S4：BUG_MAP 前 4 项必须全保留（不截断丢项）
+  const sqlKeys = SE.buildSolutions({ bug_type: 'sql_injection' }, 6).map((s) => s.essence);
+  assert.ok(sqlKeys.includes('PARAMETERIZED') && sqlKeys.includes('INPUT_VALIDATION') &&
+            sqlKeys.includes('API_REPLACEMENT') && sqlKeys.includes('ARCHITECTURE'),
+            'BUG_MAP 前 4 项应全保留，实际 ' + sqlKeys.join(','));
+  // S7：空集判不通过
+  assert.equal(SE.distinctCheck([]).ok, false);
+  assert.ok(SE.distinctCheck([]).message.includes('空方案集'));
 });
