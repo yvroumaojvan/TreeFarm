@@ -61,7 +61,7 @@
   二次注入（escape/quote 转义后仍拼接进 SQL/命令危险函数）、jQuery .html() 注入补捕
 - **2026 CVE 组**：zip/tar extractall 动态路径（Zip Slip/Tar Slip）、AES 固定 IV、
   DES/ECB 弱加密、RSA 短密钥（<2048）
-- **🌳→🧠 树场×思维树 强关联铁律（乖宝钦点）**：检测命令（--security/--performance/--logic/
+- **🌳→🧠 树场×思维树 强关联铁律（作者钦点）**：检测命令（--security/--performance/--logic/
   --all-checks/--static-ast）输出尾部强制追加"静态检测只完成 50%，须续跑思维树四维推理"横幅；
   tree-farm SKILL 与 tree-of-thought SKILL 白纸黑字写明二段式协作协议
 - **新增 40 用例**：test_security_langs（21，四语言变体+负例）、test_security_obfuscation3（12）、
@@ -101,7 +101,7 @@
 
 ### 🚀 20 轮递进测试收官（776 测试全绿，新增 221 用例）
 
-深夜全权委托模式（乖宝睡觉、无人看管、限流防御装甲）完成 20 轮权威测试循环。
+深夜全权委托模式（作者休息、无人看管、限流防御装甲）完成 20 轮权威测试循环。
 全部源码逐行通读（analysis.py 3800+ 行、沙箱 13 文件、思维树算法）后，
 每轮 = 权威极难测试 → 功能全开检测 → 识别短板 → 修复 → 回归。
 

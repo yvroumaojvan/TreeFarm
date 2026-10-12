@@ -2,7 +2,7 @@
 """
 树场 20 轮测试 · 第 11 轮：tornado 金标准回归（BugsInPy，unittest）
 
-靶场：/storage/emulated/0/豆包的工作区/benchmark_bugs/buggy_1~7
+靶场：benchmark_bugs/buggy_1~7
 （BugsInPy tornado 7 个真实 bug 的植入文件）
 
 战绩基线（r11 实测）：
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tree_farm as tf  # noqa: E402
 
-BENCH_DIR = "/storage/emulated/0/豆包的工作区/benchmark_bugs"
+BENCH_DIR = "benchmark_bugs"
 
 
 def has_benchmark():
