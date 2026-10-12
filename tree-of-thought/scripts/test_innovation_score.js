@@ -1,0 +1,167 @@
+#!/usr/bin/env node
+/**
+ * test_innovation_score.js —— 创新能力评分器 V1 测试套件（零依赖，Node 原生断言）
+ * 覆盖：L2/L3/L4 分级、边界保护（非法输入拒绝）、换措辞降分、一次性结果不给满分。
+ */
+'use strict';
+const assert = require('assert');
+const { scoreInnovation } = require('./innovation_score.js');
+
+let passed = 0;
+function t(name, fn) {
+  try { fn(); passed++; console.log('✅ ' + name); }
+  catch (e) { console.error('❌ ' + name + '\n   ' + e.message); process.exitCode = 1; }
+}
+
+// 1) L2：组合候选，未实现未运行 → 应落 L2（20-39）
+t('L2 组合候选', () => {
+  const r = scoreInnovation({
+    scheme: '将哈希索引与滑动窗口组合，改造为缓存淘汰策略',
+    different: true,
+    code: false, ran: false,
+  });
+  assert.strictEqual(r.level, 'L2');
+  assert.strictEqual(r.dims.novelty, 15);
+  assert.ok(r.total >= 20 && r.total <= 39);
+});
+
+// 2) L3：已实现 + 运行 + baseline 对比（无重复实验）→ L3（40-64）
+t('L3 可执行创新', () => {
+  const r = scoreInnovation({
+    scheme: '用二分跳表替代线性扫描，改造检索路径',
+    different: true,
+    code: true, ran: true,
+    results: [41], baseline: 53,
+  });
+  assert.strictEqual(r.level, 'L3');
+  assert.strictEqual(r.dims.executable, 15);
+  assert.strictEqual(r.dims.experiment, 20);
+});
+
+// 3) L4：多次实验稳定 + 换输入/种子 + 新颖性证据 + 真实优于 baseline → L4（65-84）
+t('L4 可重复创新', () => {
+  const r = scoreInnovation({
+    scheme: '融合马尔可夫与指纹检索的混合索引',
+    different: true,
+    code: true, ran: true,
+    results: [68.2, 66.9, 67.4, 67.1, 66.8],
+    baseline: 80.1,
+    inputs: 3, seeds: 2, variant_verified: true, repeats: 5,
+    distinct_inputs: 3, // v0.9：独立条件数必须由数据自证
+    // v0.8：L4 需要证据完整性——ms_all 每输入 ≥3 次合法测量
+    ms_all: [[68.2, 66.9, 67.4, 67.1, 66.8], [68.1, 67.0, 67.3, 67.2, 66.9], [68.0, 66.8, 67.5, 67.1, 67.0]],
+    // v0.9：baseline 原始证据也必须完整（审计可复核）
+    baseline_ms_all: [[80.0, 80.2, 79.8, 80.1, 79.9], [79.9, 80.1, 80.0, 80.2, 79.8], [80.1, 79.9, 80.0, 80.1, 80.0]],
+    novelty_check: '检索未见同构方案，无先例，与已有 LSH 不是重复',
+    improved: true,   // v0.6：L4 必须真实优于 baseline
+  });
+  assert.strictEqual(r.level, 'L4');
+  assert.ok(r.dims.robustness >= 15);
+  assert.ok(r.dims.evidence >= 6);
+  assert.ok(r.notes);   // 总分达到 L5 区间但缺外部验证 → 硬门槛降 L4 并给提示
+});
+
+// 3b) GPT 审修复：伪 L4 复现——只跑一次 + 写句 novelty_check → 不得进 L4
+t('伪L4拦截：单次实验不得进L4（GPT审案例）', () => {
+  const r = scoreInnovation({
+    scheme: '候选比 baseline 好一点点',
+    different: true,
+    code: true, ran: true,
+    results: [11],   // 只跑 1 次
+    baseline: 10,
+    novelty_check: '检索未见同构方案',
+    inputs: 1, seeds: 1,
+  });
+  assert.strictEqual(r.level, 'L3');   // 必须降级（缺可重复证据）
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+// 3c) GPT 审第五份：同输入重复 ≥3 次只证明"运行稳定"，不得单独进 L4（跨条件证据才算）
+t('同输入重复不得冒充L4（GPT审5：跨条件证据才算）', () => {
+  const r = scoreInnovation({
+    scheme: '对同一输入重复跑三次的候选',
+    different: true,
+    code: true, ran: true,
+    results: [10, 10, 10], baseline: 10,
+    repeated_same_input: true,   // 只证明运行稳定，不证明换条件仍成立
+  });
+  assert.strictEqual(r.level, 'L3');   // 缺跨条件可重复证据 → 不能 L4
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+// 3d) GPT 审第六份：跨条件可重复但未超越 baseline → 不得 L4（可重复≠成功）
+t('未超越不得L4（GPT审6：可重复≠成功）', () => {
+  const r = scoreInnovation({
+    scheme: '与 baseline 等价但更慢的候选',
+    different: true,
+    code: true, ran: true,
+    results: [0.136, 0.022, 0.026],   // 跨输入都跑了
+    baseline: 0.06,
+    inputs: 3, variant_verified: true,
+    novelty_check: '检索未见同构方案，无先例',
+    improved: false,   // 没超过 baseline
+  });
+  assert.strictEqual(r.level, 'L3');   // 跨条件可重复但未成功 → 不能 L4
+  assert.ok(r.notes && r.notes.some((n) => n.includes('L4')));
+});
+
+// 3e) GPT 审第七份：重复测量次数必须进证据——repeat=5 分数高于 repeat=1
+t('重复次数进评分（GPT审7：证据链不压扁）', () => {
+  const base = {
+    scheme: '跨输入重复测量的候选',
+    different: true,
+    code: true, ran: true,
+    results: [0.02, 0.03, 0.025], baseline: 0.04,
+    inputs: 3, variant_verified: true, improved: true,
+    repeats: 5, distinct_inputs: 3,
+    ms_all: [[0.02, 0.021, 0.019, 0.02, 0.022], [0.03, 0.031, 0.029, 0.03, 0.032], [0.025, 0.026, 0.024, 0.025, 0.027]],
+    baseline_ms_all: [[0.04, 0.041, 0.039, 0.04, 0.042], [0.04, 0.04, 0.041, 0.039, 0.04], [0.041, 0.039, 0.04, 0.04, 0.04]],
+    novelty_check: '检索未见同构方案，无先例',
+  };
+  const r1 = scoreInnovation({ ...base, repeats: 1 });
+  const r5 = scoreInnovation({ ...base, repeats: 5 });
+  assert.ok(r5.total > r1.total);        // 重复证据必须反映到分数（此前 repeat=1/2/5 全一样）
+  assert.ok(r5.dims.robustness > r1.dims.robustness);
+  assert.strictEqual(r5.level, 'L4');    // 且不破坏 L4 判定
+});
+
+// 4) 边界保护：非法数值输入 → 拒绝评分（防 NaN，GPT 挖的坑）
+t('边界保护：非法输入拒绝', () => {
+  const r = scoreInnovation({
+    scheme: '任意方案',
+    different: true,
+    results: ['x'],   // 非法
+  });
+  assert.ok(r.error);
+  assert.strictEqual(r.total, 0);
+});
+
+// 5) 换措辞降分：different=false → novelty 只给 5，总分低
+t('换措辞不给高分', () => {
+  const r = scoreInnovation({
+    scheme: '把扫描算法换个说法重写',
+    different: false,
+    ran: true, results: [5], baseline: 5,
+  });
+  assert.strictEqual(r.dims.novelty, 5);
+  assert.ok(r.total < 40);   // 落不到 L3
+});
+
+// 6) 一次性结果不给稳健分：results 只有 1 条 → robustness ≤ 7（不给 20 满分）
+t('单次结果不给重复性满分', () => {
+  const r = scoreInnovation({
+    scheme: '某一次性实验方案',
+    different: true,
+    ran: true, results: [99], baseline: 90,
+    novelty_check: '无先例检索通过',
+  });
+  assert.ok(r.dims.robustness <= 7);
+});
+
+// 7) 空证据 → 拒绝
+t('空证据拒绝', () => {
+  const r = scoreInnovation(null);
+  assert.ok(r.error);
+});
+
+console.log(`\n${passed}/11 通过`);

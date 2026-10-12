@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "trunk": "测试内核：如何让缓存自动适应访问模式",
+  "nodes": {
+    "n_1": {
+      "id": "n_1",
+      "parent": null,
+      "depth": 0,
+      "type": "trunk",
+      "content": "测试内核：如何让缓存自动适应访问模式",
+      "status": "expanded",
+      "children": [
+        "n_2"
+      ],
+      "pruned": false,
+      "score": null
+    },
+    "n_2": {
+      "id": "n_2",
+      "parent": "n_1",
+      "depth": 1,
+      "type": "form",
+      "content": {
+        "form": "机制：滑动窗口",
+        "idea": "用滑动窗口统计热点并动态换缓存策略",
+        "why": "适配访问模式变化"
+      },
+      "status": "scored",
+      "children": [],
+      "pruned": false,
+      "score": {
+        "relevance": 8,
+        "novelty": 9,
+        "expressiveness": 7,
+        "feasibility": 6,
+        "total": 8.05
+      }
+    }
+  },
+  "order": [
+    "n_1",
+    "n_2"
+  ],
+  "nextId": 3,
+  "mode": "innovation"
+}
