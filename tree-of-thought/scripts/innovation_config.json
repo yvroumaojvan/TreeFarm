@@ -1,0 +1,51 @@
+{
+  "_说明": "🐛 创新引擎配置文件 —— 想改什么直接改这里，不用碰代码！改完保存，下次运行就生效。",
+  "mode": "simple",
+  "features": {
+    "_说明": "功能开关：true=开 / false=关",
+    "autoGenerate": true,
+    "autoScore": true,
+    "evolve": true,
+    "circle": true,
+    "exportHtml": true
+  },
+  "branches": {
+    "_说明": "分支数量：一次生成/一轮画圆用多少条分支",
+    "min": 3,
+    "default": 6,
+    "max": 12
+  },
+  "generate": {
+    "_说明": "方案生成器参数",
+    "strategyPool": true,
+    "harvestGraft": true,
+    "mutation": true
+  },
+  "evolve": {
+    "_说明": "多轮进化参数",
+    "rounds": 3
+  },
+  "circle": {
+    "_说明": "蝴蝶效应不规则圆 · 算法参数（不懂原理别动）",
+    "zThreshold": 1.2,
+    "sharpDelta": 25,
+    "weightCv": 0.6,
+    "weightSharp": 0.4,
+    "levelMid": 30,
+    "levelHigh": 65,
+    "minPx": 30,
+    "maxPx": 140
+  },
+  "theme": {
+    "_说明": "导出报告页配色（薄荷青 + 星云粉紫）",
+    "bg": "#0b1020",
+    "card": "#141c38",
+    "line": "#243056",
+    "mint": "#34D399",
+    "mint2": "#5EEAD4",
+    "purple": "#E879F9",
+    "purple2": "#A78BFA",
+    "text": "#e2e8f0",
+    "dim": "#8b98c8"
+  }
+}
