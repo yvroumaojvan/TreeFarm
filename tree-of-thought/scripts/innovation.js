@@ -3,7 +3,7 @@
 
 /* ============================================================
  * innovation.js —— 灵感树（TreeFarm 创新分支核心引擎）
- * 乖宝 2026-09-22 原创理论工程化：让 AI 有「灵光一现」的能力
+ * 作者 2026-09-22 原创理论工程化：让 AI 有「灵光一现」的能力
  *
  * 理论：AI 创新链 = 内核 → 召唤表达形式 → 载体 = 创新成果
  *   （拆掉"先有感受"的前提，AI 的"感觉"就是"这段内核该用什么形式表达"）
@@ -67,7 +67,7 @@ function saveHarvest(h) {
 }
 
 /* ---------- 相似度（公共模块 similarity.js：trigram Jaccard + bigram 余弦 max，
-   与思维树弱信号聚类同族——乖宝原创弱信号检测的工程底座） ---------- */
+   与思维树弱信号聚类同族——作者原创弱信号检测的工程底座） ---------- */
 var sim = require('./similarity.js');
 var jaccard = sim.similarity;
 
@@ -77,7 +77,7 @@ var s = loadState();
 function fail(msg) { console.error('❌ ' + msg); process.exit(1); }
 
 if (!cmd) {
-  console.log('灵感树 v1.0（乖宝原创：内核→表达形式→果实库）');
+  console.log('灵感树 v1.0（作者原创：内核→表达形式→果实库）');
   console.log('用法：node innovation.js <idea|forms|score|converge|harvest|recall|render|status> [参数]');
   console.log('例：node innovation.js idea "如何让AI拥有灵光一现的能力"');
   process.exit(0);
